@@ -8,6 +8,8 @@ const controller = require("../controllers/taskController");
 const {
   requireAuth
 } = require("../middleware/authMiddleware");
+const { fail } = require("../utils/response");
+const { isPositiveIntegerId } = require("../utils/validation");
 
 // Create router.
 const router = express.Router();
@@ -18,6 +20,11 @@ const router = express.Router();
 
 // Every task route requires login.
 router.use(requireAuth);
+
+router.param("id", (req, res, next, id) => {
+  if (!isPositiveIntegerId(id)) return fail(res, 400, "Invalid task ID.");
+  return next();
+});
 
 // ======================================================
 // AI TASK VALIDATION

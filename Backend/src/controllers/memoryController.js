@@ -11,11 +11,11 @@ function handle(handler) {
   };
 }
 const list = handle(async (req, res) => {
-  const data = await memoryService.listMemories({ userId: req.user.id, ...req.query });
+  const data = await memoryService.listMemories({ ...req.query, userId: req.user.id });
   return res.json({ success: true, data });
 });
 const create = handle(async (req, res) => {
-  const data = await memoryService.createMemory({ userId: req.user.id, ...req.body });
+  const data = await memoryService.createMemory({ ...req.body, userId: req.user.id });
   return res.status(201).json({ success: true, data });
 });
 const get = handle(async (req, res) => {
@@ -23,16 +23,20 @@ const get = handle(async (req, res) => {
   return res.json({ success: true, data });
 });
 const update = handle(async (req, res) => {
-  const data = await memoryService.updateMemory({ userId: req.user.id, memoryId: Number(req.params.memoryId), ...req.body });
+  const data = await memoryService.updateMemory({ ...req.body, userId: req.user.id, memoryId: Number(req.params.memoryId) });
   return res.json({ success: true, data });
 });
 const remove = handle(async (req, res) => {
   const data = await memoryService.deleteMemory({ userId: req.user.id, memoryId: Number(req.params.memoryId) });
   return res.json({ success: true, data });
 });
+const clear = handle(async (req, res) => {
+  const data = await memoryService.clearMemories({ userId: req.user.id });
+  return res.json({ success: true, data });
+});
 const search = handle(async (req, res) => {
-  const data = await memoryService.getRelevantMemories({ userId: req.user.id, ...req.query });
+  const data = await memoryService.getRelevantMemories({ ...req.query, userId: req.user.id });
   return res.json({ success: true, data });
 });
 
-module.exports = { list, create, get, update, remove, search };
+module.exports = { list, create, get, update, remove, clear, search };

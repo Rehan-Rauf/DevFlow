@@ -15,6 +15,7 @@ export default function AIMemoryPanel({ isOpen, onClose, scope = {}, title = "AI
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [confirm, setConfirm] = useState(null);
+  const [confirmClear, setConfirmClear] = useState(false);
 
   async function load() {
     setError("");
@@ -69,6 +70,20 @@ export default function AIMemoryPanel({ isOpen, onClose, scope = {}, title = "AI
     }
   }
 
+  async function clearAll() {
+    setBusy(true);
+    setError("");
+    try {
+      await api.clearMemories();
+      setMemories([]);
+      setConfirmClear(false);
+    } catch (requestError) {
+      setError(requestError.message || "Unable to clear saved memories.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <>
       <Modal isOpen={isOpen} onClose={onClose} title={title} closeDisabled={busy} className="ai-memory-modal">
@@ -77,6 +92,11 @@ export default function AIMemoryPanel({ isOpen, onClose, scope = {}, title = "AI
             <option value="">All</option>
             {TYPES.map((type) => <option key={type} value={type}>{type[0].toUpperCase() + type.slice(1)}s</option>)}
           </select>
+          {memories.length > 0 && (
+            <Button variant="danger" onClick={() => setConfirmClear(true)} disabled={busy}>
+              Clear all memories
+            </Button>
+          )}
           <Button onClick={() => startEdit()}>+ Add Memory</Button>
         </div>
         {error && <div className="ai-error" role="alert">{error}</div>}
@@ -111,6 +131,15 @@ export default function AIMemoryPanel({ isOpen, onClose, scope = {}, title = "AI
         )}
       </Modal>
       <ConfirmDialog isOpen={Boolean(confirm)} onClose={() => !busy && setConfirm(null)} onConfirm={remove} busy={busy} title="Forget memory" description="Permanently remove this memory from AI retrieval?" confirmLabel="Forget memory" />
+      <ConfirmDialog
+        isOpen={confirmClear}
+        onClose={() => !busy && setConfirmClear(false)}
+        onConfirm={clearAll}
+        busy={busy}
+        title="Clear saved AI memory"
+        description="Permanently delete all of your saved AI memories? Conversation history will not be deleted."
+        confirmLabel="Clear all memories"
+      />
     </>
   );
 }

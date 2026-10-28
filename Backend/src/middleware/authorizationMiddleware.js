@@ -9,7 +9,8 @@ function forbidden(message) {
 async function getOrganizationMembership(userId, organizationId, client = pool) {
   const result = await client.query(
     `SELECT role FROM organization_members
-     WHERE organization_id = $1 AND user_id = $2`,
+     WHERE organization_id = $1 AND user_id = $2
+     FOR SHARE`,
     [organizationId, userId],
   );
   return result.rows[0] || null;

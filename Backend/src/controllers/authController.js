@@ -12,6 +12,11 @@ const pool = require("../config/database");
 const { ok, created, fail } = require("../utils/response");
 const { hashToken } = require("../middleware/authMiddleware");
 const { sendPasswordResetEmail } = require("../services/emailService");
+const {
+  consumeResetRateLimit,
+  recordAuthSecurityEvent,
+  securityDigest,
+} = require("../services/passwordResetSecurity");
 
 const emailRegex =
   /^(?!.*\.\.)[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
@@ -36,6 +41,20 @@ function getResetToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
+function disconnectUserSockets(req, userId, token = null) {
+  const sockets = req.app.get("io")?.sockets?.sockets;
+  if (!sockets) return;
+
+  for (const socket of sockets.values()) {
+    if (
+      Number(socket.user?.id) === Number(userId)
+      && (!token || socket.authToken === token)
+    ) {
+      socket.disconnect(true);
+    }
+  }
+}
+
 // ======================================================
 // MAKE JWT TOKEN
 // ======================================================
@@ -47,6 +66,7 @@ function makeToken(user) {
     {
       id: user.id,
       role: user.role,
+      authVersion: user.auth_version ?? 0,
     },
 
     // JWT secret .env file se aa raha hai
@@ -77,6 +97,7 @@ async function signup(req, res) {
       typeof email !== "string" ||
       typeof password !== "string" ||
       !name.trim() ||
+      name.trim().length > 120 ||
       !email.trim() ||
       !password
     ) {
@@ -179,7 +200,7 @@ async function signup(req, res) {
     const result = await pool.query(
       `INSERT INTO users (name, email, password)
        VALUES ($1, $2, $3)
-       RETURNING id, name, email, role, status, created_at`,
+       RETURNING id, name, email, role, status, auth_version, created_at`,
 
       [
         name.trim(),
@@ -235,7 +256,7 @@ async function login(req, res) {
 
     // Database mein email ke according user search kar rahe hain
     const result = await pool.query(
-      `SELECT id, name, email, password, role, status
+      `SELECT id, name, email, password, role, status, auth_version
        FROM users
        WHERE email = $1`,
 
@@ -308,38 +329,109 @@ async function login(req, res) {
 }
 
 async function requestPasswordReset(req, res) {
-  const email = typeof req.body?.email === "string"
+  const emailInput = typeof req.body?.email === "string"
     ? req.body.email.trim().toLowerCase()
     : "";
-
-  if (!emailRegex.test(email)) {
-    return fail(res, 400, "Please enter a valid email address.");
-  }
+  const email = emailInput.slice(0, 254);
 
   try {
-    const result = await pool.query(
-      "SELECT id, email FROM users WHERE email = $1 AND status = 'active'",
-      [email],
-    );
-
-    if (result.rowCount) {
-      const token = getResetToken();
-      await pool.query(
-        "UPDATE password_reset_tokens SET used_at = NOW() WHERE user_id = $1 AND used_at IS NULL",
-        [result.rows[0].id],
+    const ipAllowed = await consumeResetRateLimit("ip", req.ip, {
+      limit: 20,
+      windowMinutes: 60,
+    });
+    if (!ipAllowed) {
+      await recordAuthSecurityEvent({
+        eventType: "password_reset_rate_limited",
+        subject: email,
+        source: req.ip,
+      });
+      return ok(
+        res,
+        null,
+        "If an active account exists for that email, a password reset link has been sent.",
       );
-      await pool.query(
-        `INSERT INTO password_reset_tokens (token_hash, user_id, expires_at)
-         VALUES ($1, $2, NOW() + INTERVAL '1 hour')`,
-        [hashToken(token), result.rows[0].id],
-      );
+    }
 
+    if (emailInput.length > 254 || !emailRegex.test(email)) {
+      await recordAuthSecurityEvent({
+        eventType: "password_reset_rejected",
+        subject: email,
+        source: req.ip,
+      });
+      return fail(res, 400, "Please enter a valid email address.");
+    }
+
+    const emailAllowed = await consumeResetRateLimit("email", email, {
+      limit: 3,
+      windowMinutes: 60,
+    });
+
+    if (!emailAllowed) {
+      await recordAuthSecurityEvent({
+        eventType: "password_reset_rate_limited",
+        subject: email,
+        source: req.ip,
+      });
+      return ok(
+        res,
+        null,
+        "If an active account exists for that email, a password reset link has been sent.",
+      );
+    }
+
+    const client = await pool.connect();
+    let user;
+    let token;
+    try {
+      await client.query("BEGIN");
+      const result = await client.query(
+        `SELECT id, email FROM users
+         WHERE email = $1 AND status = 'active'
+         FOR UPDATE`,
+        [email],
+      );
+      user = result.rows[0] || null;
+
+      if (user) {
+        token = getResetToken();
+        await client.query(
+          "UPDATE password_reset_tokens SET used_at = NOW() WHERE user_id = $1 AND used_at IS NULL",
+          [user.id],
+        );
+        await client.query(
+          `INSERT INTO password_reset_tokens (token_hash, user_id, expires_at)
+           VALUES ($1, $2, NOW() + INTERVAL '1 hour')`,
+          [hashToken(token), user.id],
+        );
+      }
+
+      await client.query(
+        `INSERT INTO auth_security_events
+           (event_type, user_id, subject_hash, source_hash)
+         VALUES ('password_reset_requested', $1, $2, $3)`,
+        [
+          user?.id || null,
+          securityDigest(email),
+          securityDigest(req.ip),
+        ],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    if (user) {
       const emailResult = await sendPasswordResetEmail({
-        email: result.rows[0].email,
+        email: user.email,
         token,
       });
       if (!emailResult.sent) {
-        console.error("Password reset email was not sent:", emailResult);
+        console.error(
+          `Password reset email was not sent (status ${emailResult.statusCode || "unavailable"}).`,
+        );
       }
     }
 
@@ -359,6 +451,11 @@ async function resetPassword(req, res) {
   const password = typeof req.body?.password === "string" ? req.body.password : "";
 
   if (!/^[a-f0-9]{64}$/i.test(token)) {
+    await recordAuthSecurityEvent({
+      eventType: "password_reset_rejected",
+      subject: token,
+      source: req.ip,
+    });
     return fail(res, 400, "This password reset link is invalid or has expired.");
   }
 
@@ -373,33 +470,62 @@ async function resetPassword(req, res) {
     await client.query("BEGIN");
     const result = await client.query(
       `SELECT user_id
-       FROM password_reset_tokens
-       WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()
-       FOR UPDATE`,
+       FROM password_reset_tokens prt
+       JOIN users u ON u.id = prt.user_id
+       WHERE prt.token_hash = $1
+         AND prt.used_at IS NULL
+         AND prt.expires_at > NOW()
+         AND u.status = 'active'
+       FOR UPDATE OF prt, u`,
       [hashToken(token)],
     );
 
     if (!result.rowCount) {
       await client.query("ROLLBACK");
+      await recordAuthSecurityEvent({
+        eventType: "password_reset_rejected",
+        subject: token,
+        source: req.ip,
+      });
       return fail(res, 400, "This password reset link is invalid, expired, or has already been used.");
     }
 
     const hashedPassword = await bcrypt.hash(password, 12);
     await client.query(
-      `UPDATE users SET password = $1, updated_at = NOW()
+      `UPDATE users
+       SET password = $1, auth_version = auth_version + 1, updated_at = NOW()
        WHERE id = $2`,
       [hashedPassword, result.rows[0].user_id],
     );
     await client.query(
-      "UPDATE password_reset_tokens SET used_at = NOW() WHERE token_hash = $1",
-      [hashToken(token)],
+      `UPDATE password_reset_tokens SET used_at = NOW()
+       WHERE user_id = $1 AND used_at IS NULL`,
+      [result.rows[0].user_id],
+    );
+    await client.query(
+      `INSERT INTO auth_security_events (event_type, user_id, subject_hash, source_hash)
+       VALUES ('password_reset_completed', $1, $2, $3)`,
+      [
+        result.rows[0].user_id,
+        securityDigest(result.rows[0].user_id),
+        securityDigest(req.ip),
+      ],
     );
     await client.query("COMMIT");
 
+    disconnectUserSockets(req, result.rows[0].user_id);
     return ok(res, null, "Password changed successfully. You can now sign in.");
   } catch (error) {
     if (client) {
       await client.query("ROLLBACK").catch(() => {});
+    }
+    if (error?.code === "23503" || error?.code === "P0002") {
+      await recordAuthSecurityEvent({
+        eventType: "password_reset_rejected",
+        subject: token,
+        source: req.ip,
+      });
+      return fail(res, 400, "This password reset link is invalid, expired, or has already been used.");
     }
     console.error("Password reset error:", error);
     return fail(res, 500, "Unable to reset your password.");
@@ -497,6 +623,7 @@ async function logout(req, res) {
        ON CONFLICT (token_hash) DO NOTHING`,
       [hashToken(token), expiresAt],
     );
+    disconnectUserSockets(req, req.user.id, token);
 
     return ok(res, null, "Logged out successfully.");
   } catch (error) {

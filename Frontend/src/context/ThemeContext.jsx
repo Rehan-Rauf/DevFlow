@@ -5,7 +5,7 @@ const STORAGE_KEY = "devflow_theme";
 
 function readTheme() {
   const saved = localStorage.getItem(STORAGE_KEY);
-  return ["light", "dark", "system"].includes(saved) ? saved : "system";
+  return ["light", "dark", "system"].includes(saved) ? saved : "dark";
 }
 
 function resolveTheme(theme) {

@@ -96,7 +96,14 @@ export default function ProjectDetail() {
       auth: { token: localStorage.getItem("cms_token") },
     });
     socket.on("task_changed", loadProject);
-    return () => socket.disconnect();
+    const refreshAfterQuickCreate = (event) => {
+      if (String(event.detail?.projectId || event.detail?.project_id) === String(id)) loadProject();
+    };
+    window.addEventListener("devflow:task-created", refreshAfterQuickCreate);
+    return () => {
+      socket.disconnect();
+      window.removeEventListener("devflow:task-created", refreshAfterQuickCreate);
+    };
   }, [id]);
 
   const updateTaskForm = (field, value) => {
@@ -253,7 +260,18 @@ export default function ProjectDetail() {
           <h1>{project?.name || "Project"}</h1>
           <p className="muted">{project?.description || "Project workspace"}</p>
         </div>
-        <span className="ui-badge">{project?.status || "Active"}</span>
+        <div className="ui-page-header__actions">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => window.dispatchEvent(new CustomEvent("devflow:open-task-agent", {
+              detail: { entityType: "project", entityId: Number(id) },
+            }))}
+          >
+            Task Agent
+          </Button>
+          <span className="ui-badge">{project?.status || "Active"}</span>
+        </div>
       </div>
 
       {error && <InlineNotice>{error}</InlineNotice>}

@@ -153,35 +153,34 @@ export default function Signup() {
           {fieldErrors.email && <span className="field-error" id="signup-email-error">{fieldErrors.email}</span>}
         </label>
 
-        <label>
-          Password
-          <span className="password-input-wrap">
-            <input
-              required
-              type={showPassword ? "text" : "password"}
-              minLength="8"
-              autoComplete="new-password"
-              value={form.password}
-              onChange={(event) => updateField("password", event.target.value)}
-              onBlur={() => {
-                setPasswordTouched(true);
-                setFieldErrors((current) => ({ ...current, password: getPasswordError(form.password) }));
-              }}
-              aria-invalid={Boolean(fieldErrors.password)}
-              aria-describedby={fieldErrors.password ? "password-requirements signup-password-error" : "password-requirements"}
-            />
-            <button
-              className="password-toggle"
-              type="button"
-              onClick={() => setShowPassword((visible) => !visible)}
-              aria-label={showPassword ? "Hide password" : "Show password"}
-              aria-pressed={showPassword}
-            >
-              <PasswordVisibilityIcon visible={showPassword} />
-            </button>
-          </span>
-          {fieldErrors.password && <span className="field-error" id="signup-password-error">{fieldErrors.password}</span>}
-        </label>
+        <label htmlFor="signup-password">Password</label>
+        <span className="password-input-wrap">
+          <input
+            id="signup-password"
+            required
+            type={showPassword ? "text" : "password"}
+            minLength="8"
+            autoComplete="new-password"
+            value={form.password}
+            onChange={(event) => updateField("password", event.target.value)}
+            onBlur={() => {
+              setPasswordTouched(true);
+              setFieldErrors((current) => ({ ...current, password: getPasswordError(form.password) }));
+            }}
+            aria-invalid={Boolean(fieldErrors.password)}
+            aria-describedby={fieldErrors.password ? "password-requirements signup-password-error" : "password-requirements"}
+          />
+          <button
+            className="password-toggle"
+            type="button"
+            onClick={() => setShowPassword((visible) => !visible)}
+            aria-label={showPassword ? "Hide password" : "Show password"}
+            aria-pressed={showPassword}
+          >
+            <PasswordVisibilityIcon visible={showPassword} />
+          </button>
+        </span>
+        {fieldErrors.password && <span className="field-error" id="signup-password-error">{fieldErrors.password}</span>}
 
         <ul className={`password-requirements ${passwordTouched ? "is-touched" : ""}`} id="password-requirements" aria-label="Password requirements">
           {PASSWORD_REQUIREMENTS.map((requirement) => {

@@ -10,12 +10,17 @@ async function test() {
   try {
     const query = "web app project";
     const organizationId = 5;
+    const userId = Number(process.env.DEVFLOW_TEST_USER_ID);
+    if (!Number.isSafeInteger(userId) || userId <= 0) {
+      throw new Error("Set DEVFLOW_TEST_USER_ID to an authorized user before running this probe.");
+    }
 
     console.log("Query:", query);
     console.log("Organization:", organizationId);
 
     const results = await searchKnowledge({
       query,
+      userId,
       organizationId,
     });
 

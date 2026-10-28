@@ -1,6 +1,7 @@
 const pool = require("../config/database");
 const { ok, created, fail } = require("../utils/response");
 const knowledgeBaseService = require("../services/knowledgeBaseService");
+const { emitToAuthorizedTaskRoom } = require("../services/taskRoomAuthorization");
 
 /*
  * ============================================================
@@ -34,10 +35,22 @@ async function taskAccess(userId, taskId) {
 
       EXISTS (
         SELECT 1
+        FROM organization_members om
+        WHERE om.organization_id = p.organization_id
+          AND om.user_id = $1
+      ) AS is_org_member,
+
+      EXISTS (
+        SELECT 1
         FROM project_members pm
         WHERE pm.project_id = t.project_id
           AND pm.user_id = $1
           AND pm.role = 'project_admin'
+          AND EXISTS (
+            SELECT 1 FROM organization_members om
+            WHERE om.organization_id = p.organization_id
+              AND om.user_id = pm.user_id
+          )
       ) AS is_project_admin,
 
       EXISTS (
@@ -45,6 +58,11 @@ async function taskAccess(userId, taskId) {
         FROM project_members pm
         WHERE pm.project_id = t.project_id
           AND pm.user_id = $1
+          AND EXISTS (
+            SELECT 1 FROM organization_members om
+            WHERE om.organization_id = p.organization_id
+              AND om.user_id = pm.user_id
+          )
       ) AS is_project_member
 
     FROM tasks t
@@ -67,7 +85,8 @@ async function taskAccess(userId, taskId) {
  *
  * GET /api/comments/task/:taskId
  *
- * Only organization members can see comments.
+ * Only users authorized for the task can see comments: organization owners,
+ * project admins, and the assigned project member.
  */
 async function listComments(req, res) {
   try {
@@ -83,7 +102,7 @@ async function listComments(req, res) {
       return fail(res, 404, "Task not found.");
     }
 
-    if (!access.is_org_owner && !access.is_project_admin && !(access.is_project_member && String(access.assignee_id) === String(req.user.id))) {
+    if (!access.is_org_member || (!access.is_org_owner && !access.is_project_admin && !(access.is_project_member && String(access.assignee_id) === String(req.user.id)))) {
       return fail(
         res,
         403,
@@ -150,13 +169,11 @@ async function listComments(req, res) {
  *   "parentId": 25
  * }
  *
- * Permission:
- *
- * Organization member  -> YES
- * Organization admin   -> YES
- * Non-member           -> NO
+ * Permission follows task access: organization owner, project admin, or
+ * assigned project member.
  */
 async function addComment(req, res) {
+  let client;
   try {
     const taskId = Number(req.params.taskId);
 
@@ -214,7 +231,7 @@ async function addComment(req, res) {
      * ONLY PROJECT-ALLOWED USERS CAN COMMENT
      * --------------------------------------------------------
      */
-    if (!access.is_org_owner && !access.is_project_admin && !(access.is_project_member && String(access.assignee_id) === String(req.user.id))) {
+    if (!access.is_org_member || (!access.is_org_owner && !access.is_project_admin && !(access.is_project_member && String(access.assignee_id) === String(req.user.id)))) {
       return fail(
         res,
         403,
@@ -283,7 +300,9 @@ async function addComment(req, res) {
      *
      * Socket.IO should NOT be used to save the comment.
      */
-    const inserted = await pool.query(
+    client = await pool.connect();
+    await client.query("BEGIN");
+    const inserted = await client.query(
       `
       INSERT INTO task_comments
         (
@@ -312,6 +331,12 @@ async function addComment(req, res) {
         content.trim()
       ]
     );
+    await client.query(
+      `INSERT INTO task_activity (task_id, user_id, action, new_value)
+       VALUES ($1, $2, 'commented', 'Comment added')`,
+      [taskId, req.user.id],
+    );
+    await client.query("COMMIT");
 
 
     /*
@@ -374,12 +399,13 @@ async function addComment(req, res) {
     const io = req.app.get("io");
 
     if (io) {
-      io
-        .to(`task:${taskId}`)
-        .emit(
-          "comment_added",
-          row
-        );
+      await emitToAuthorizedTaskRoom(
+        io,
+        taskId,
+        "comment_added",
+        row,
+        req.app.get("authorizeTaskSocketAccess"),
+      );
     }
 
 
@@ -520,6 +546,9 @@ async function addComment(req, res) {
     );
 
   } catch (e) {
+    if (client) {
+      await client.query("ROLLBACK").catch(() => {});
+    }
     console.error("ADD COMMENT ERROR:", e);
 
     return fail(
@@ -527,6 +556,8 @@ async function addComment(req, res) {
       500,
       "Unable to add comment."
     );
+  } finally {
+    client?.release();
   }
 }
 
@@ -545,6 +576,7 @@ async function addComment(req, res) {
  * Non-member                          -> NO
  */
 async function deleteComment(req, res) {
+  let client;
   try {
     const commentId = Number(req.params.id);
 
@@ -579,10 +611,22 @@ async function deleteComment(req, res) {
 
         EXISTS (
           SELECT 1
+          FROM organization_members om
+          WHERE om.organization_id = p.organization_id
+            AND om.user_id = $2
+        ) AS is_org_member,
+
+        EXISTS (
+          SELECT 1
           FROM project_members pm
           WHERE pm.project_id = t.project_id
             AND pm.user_id = $2
             AND pm.role = 'project_admin'
+            AND EXISTS (
+              SELECT 1 FROM organization_members om
+              WHERE om.organization_id = p.organization_id
+                AND om.user_id = pm.user_id
+            )
         ) AS is_project_admin
 
       FROM task_comments c
@@ -624,7 +668,7 @@ async function deleteComment(req, res) {
      * ONLY ORG OWNER OR PROJECT ADMIN CAN DELETE
      * --------------------------------------------------------
      */
-    if (!comment.is_org_owner && !comment.is_project_admin) {
+    if (!comment.is_org_member || (!comment.is_org_owner && !comment.is_project_admin)) {
       return fail(
         res,
         403,
@@ -642,13 +686,21 @@ async function deleteComment(req, res) {
      * child replies can also be deleted according
      * to your database constraint.
      */
-    await pool.query(
+    client = await pool.connect();
+    await client.query("BEGIN");
+    await client.query(
+      `INSERT INTO task_activity (task_id, user_id, action, new_value)
+       VALUES ($1, $2, 'comment_deleted', $3)`,
+      [comment.task_id, req.user.id, `Comment ${commentId} deleted`],
+    );
+    await client.query(
       `
       DELETE FROM task_comments
       WHERE id = $1
       `,
       [commentId]
     );
+    await client.query("COMMIT");
 
     knowledgeBaseService
       .deleteSource("comment", commentId)
@@ -668,12 +720,13 @@ async function deleteComment(req, res) {
     const io = req.app.get("io");
 
     if (io) {
-      io
-        .to(`task:${comment.task_id}`)
-        .emit(
-          "comment_deleted",
-          commentId
-        );
+      await emitToAuthorizedTaskRoom(
+        io,
+        comment.task_id,
+        "comment_deleted",
+        commentId,
+        req.app.get("authorizeTaskSocketAccess"),
+      );
     }
 
 
@@ -684,6 +737,9 @@ async function deleteComment(req, res) {
     );
 
   } catch (e) {
+    if (client) {
+      await client.query("ROLLBACK").catch(() => {});
+    }
     console.error("DELETE COMMENT ERROR:", e);
 
     return fail(
@@ -691,6 +747,8 @@ async function deleteComment(req, res) {
       500,
       "Unable to delete comment."
     );
+  } finally {
+    client?.release();
   }
 }
 

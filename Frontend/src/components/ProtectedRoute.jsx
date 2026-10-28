@@ -27,9 +27,14 @@ import BlockedSession from "./BlockedSession";
 // Only logged-in users can access these pages.
 export default function ProtectedRoute({ children }) {
 
+  const auth = useAuth();
+  if (!auth) {
+    return <Navigate to="/login" replace />;
+  }
+
   // Get user and loading information
   // from AuthContext.
-  const { user, loading, sessionLocked } = useAuth();
+  const { user, loading, sessionLocked } = auth;
 
 
   // ======================================================

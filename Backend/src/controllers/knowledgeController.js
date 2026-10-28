@@ -2,6 +2,7 @@ const pool = require("../config/database");
 const {
   searchKnowledge: vectorSearch,
 } = require("../services/vectorSearchService");
+const { isPositiveIntegerId } = require("../utils/validation");
 
 // ============================================================
 // CHECK ORGANIZATION MEMBERSHIP
@@ -48,14 +49,14 @@ async function searchKnowledge(req, res) {
       });
     }
 
-    const parsedOrganizationId = Number(organizationId);
-
-    if (!Number.isInteger(parsedOrganizationId)) {
+    if (!isPositiveIntegerId(organizationId)) {
       return res.status(400).json({
         success: false,
         message: "Invalid organization ID.",
       });
     }
+
+    const parsedOrganizationId = Number(organizationId);
 
     // Make sure the logged-in user actually belongs to
     // this organization before searching its knowledge base.
@@ -63,21 +64,13 @@ async function searchKnowledge(req, res) {
     await assertOrgMember(req.user.id, parsedOrganizationId);
 
     // Optional project filter
-    const parsedProjectId = projectId
-      ? Number(projectId)
-      : null;
-
-    if (
-      projectId !== undefined &&
-      projectId !== null &&
-      projectId !== "" &&
-      !Number.isInteger(parsedProjectId)
-    ) {
+    if (projectId !== undefined && projectId !== null && projectId !== "" && !isPositiveIntegerId(projectId)) {
       return res.status(400).json({
         success: false,
         message: "Invalid project ID.",
       });
     }
+    const parsedProjectId = projectId ? Number(projectId) : null;
 
     // Optional result limit
     const parsedLimit = limit
@@ -93,7 +86,6 @@ async function searchKnowledge(req, res) {
 
     console.log("================================");
     console.log("KNOWLEDGE SEARCH API");
-    console.log("Query:", q.trim());
     console.log("Organization:", parsedOrganizationId);
     console.log("Project:", parsedProjectId);
     console.log("Limit:", parsedLimit);
@@ -103,6 +95,7 @@ async function searchKnowledge(req, res) {
     // vectorSearchService expects ONE OBJECT
     const results = await vectorSearch({
       query: q.trim(),
+      userId: req.user.id,
       organizationId: parsedOrganizationId,
       projectId: parsedProjectId,
       limit: parsedLimit,
@@ -129,7 +122,6 @@ async function searchKnowledge(req, res) {
         status === 500
           ? "Knowledge search failed."
           : error.message,
-      ...(status === 500 ? { error: error.message } : {}),
     });
   }
 }

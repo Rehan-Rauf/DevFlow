@@ -24,6 +24,8 @@ const controller = require("../controllers/organizationController");
 const {
   requireAuth
 } = require("../middleware/authMiddleware");
+const { fail } = require("../utils/response");
+const { isPositiveIntegerId } = require("../utils/validation");
 
 
 // Create an Express Router.
@@ -44,6 +46,21 @@ const router = express.Router();
 // If the JWT token is invalid/missing:
 //     requireAuth → 401 response → controller does NOT run
 router.use(requireAuth);
+
+router.param("id", (req, res, next, id) => {
+  if (!isPositiveIntegerId(id)) return fail(res, 400, "Invalid organization ID.");
+  return next();
+});
+
+router.param("userId", (req, res, next, userId) => {
+  if (!isPositiveIntegerId(userId)) return fail(res, 400, "Invalid user ID.");
+  return next();
+});
+
+router.param("invitationId", (req, res, next, invitationId) => {
+  if (!isPositiveIntegerId(invitationId)) return fail(res, 400, "Invalid invitation ID.");
+  return next();
+});
 
 
 // ======================================================

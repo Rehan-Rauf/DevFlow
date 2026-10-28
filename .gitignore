@@ -7,3 +7,5 @@ build/
 .vite/
 coverage/
 *.log
+.evn
+Frontend/test-results/

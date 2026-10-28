@@ -1,4 +1,6 @@
 const sgMail = require("@sendgrid/mail");
+const fs = require("fs/promises");
+const path = require("path");
 
 function maskEmail(email) {
   const [localPart, domain] = String(email).split("@");
@@ -17,6 +19,18 @@ function getPasswordResetUrl(token) {
 }
 
 async function sendEmail(message) {
+  const capturePath = process.env.NODE_ENV === "test"
+    && process.env.DEVFLOW_TEST_EMAIL_CAPTURE_PATH;
+  if (capturePath && message.subject === "Reset your DevFlow password") {
+    await fs.mkdir(path.dirname(capturePath), { recursive: true });
+    await fs.appendFile(
+      capturePath,
+      `${JSON.stringify({ to: message.to, text: message.text })}\n`,
+      { encoding: "utf8", mode: 0o600 },
+    );
+    return { sent: true, captured: true };
+  }
+
   const apiKey = process.env.SENDGRID_API_KEY?.trim();
   const fromEmail = process.env.SENDGRID_FROM_EMAIL?.trim();
   if (!apiKey || !fromEmail) {
@@ -40,13 +54,8 @@ async function sendEmail(message) {
     return { sent: true, statusCode: response?.statusCode };
   } catch (error) {
     const statusCode = error?.code || error?.response?.statusCode || "unknown";
-    const providerMessage = error?.response?.body?.errors
-      ?.map((item) => item.message)
-      .filter(Boolean)
-      .join("; ");
     console.error(
-      `Email failed for ${maskEmail(recipient)} (SendGrid ${statusCode}): ` +
-        `${providerMessage || error.message || "Unknown SendGrid error."}`,
+      `Email failed for ${maskEmail(recipient)} (SendGrid ${statusCode}).`,
     );
     return { sent: false, skipped: false, statusCode };
   }

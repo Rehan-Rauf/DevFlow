@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { api } from "../services/api";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import aiService from "../services/aiService";
 import ConfirmDialog from "./ui/ConfirmDialog";
 
 const SUGGESTIONS = [
@@ -8,6 +10,7 @@ const SUGGESTIONS = [
   "What is blocking this?",
   "Summarize the comments",
   "Suggest next steps",
+  "Explain the acceptance criteria",
 ];
 
 function SourceChip({ source }) {
@@ -30,9 +33,11 @@ function Message({ message }) {
       }`}
     >
       <div className="ai-message-bubble">
-        {message.content.split("\n").map((line, i) => (
-          <p key={i}>{line}</p>
-        ))}
+        {isUser ? message.content : (
+          <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+            {message.content}
+          </ReactMarkdown>
+        )}
       </div>
 
       {!isUser &&
@@ -55,7 +60,10 @@ export default function TaskAIPanel({ taskId }) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const [historyRetry, setHistoryRetry] = useState(0);
   const [error, setError] = useState("");
+  const [retryMessage, setRetryMessage] = useState("");
   const [endingChat, setEndingChat] = useState(false);
   const [viewingHistory, setViewingHistory] = useState(false);
   const [historyStatus, setHistoryStatus] = useState(null);
@@ -76,11 +84,15 @@ export default function TaskAIPanel({ taskId }) {
     let cancelled = false;
 
     async function loadHistory() {
+      if (!cancelled) {
+        setHistoryLoaded(false);
+        setHistoryError("");
+      }
       try {
         let data;
 
         if (selectedSessionId) {
-          const response = await api.chatSessionHistory(
+          const response = await aiService.chatSessionHistory(
             selectedSessionId
           );
           data = response.data || {};
@@ -98,7 +110,7 @@ export default function TaskAIPanel({ taskId }) {
             setHistoryStatus(data.session.status || "ENDED");
           }
         } else {
-          const response = await api.taskChatHistory(taskId);
+          const response = await aiService.taskChatHistory(taskId);
           data = response.data || {};
 
           if (!cancelled) {
@@ -126,6 +138,9 @@ export default function TaskAIPanel({ taskId }) {
           "Failed to load AI chat history:",
           e
         );
+        if (!cancelled) {
+          setHistoryError(e.message || "Unable to load saved task chat.");
+        }
       } finally {
         if (!cancelled) {
           setHistoryLoaded(true);
@@ -138,7 +153,7 @@ export default function TaskAIPanel({ taskId }) {
     return () => {
       cancelled = true;
     };
-  }, [taskId, selectedSessionId]);
+  }, [taskId, selectedSessionId, historyRetry]);
 
 
   // ======================================================
@@ -157,7 +172,7 @@ export default function TaskAIPanel({ taskId }) {
   // SEND MESSAGE
   // ======================================================
 
-  async function sendMessage(text) {
+  async function sendMessage(text, isRetry = false) {
     const trimmed = text.trim();
 
     if (
@@ -172,19 +187,21 @@ export default function TaskAIPanel({ taskId }) {
     setError("");
     setInput("");
 
-    setMessages((prev) => [
-      ...prev,
-      {
-        role: "user",
-        content: trimmed,
-        sources: [],
-      },
-    ]);
+    if (!isRetry) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "user",
+          content: trimmed,
+          sources: [],
+        },
+      ]);
+    }
 
     setLoading(true);
 
     try {
-      const response = await api.taskChat(
+      const response = await aiService.taskChat(
         taskId,
         trimmed
       );
@@ -193,6 +210,7 @@ export default function TaskAIPanel({ taskId }) {
 
       const answer = data.answer || "";
       const sources = data.sources || [];
+      setRetryMessage("");
 
       setMessages((prev) => [
         ...prev,
@@ -203,6 +221,8 @@ export default function TaskAIPanel({ taskId }) {
         },
       ]);
     } catch (e) {
+      setRetryMessage(trimmed);
+      setInput(trimmed);
       setError(
         e.message ||
           "The AI assistant is unavailable right now."
@@ -235,7 +255,7 @@ export default function TaskAIPanel({ taskId }) {
     setEndingChat(true);
 
     try {
-      await api.taskChatEnd(taskId);
+      await aiService.taskChatEnd(taskId);
 
       // Clear current chat from UI.
       setMessages([]);
@@ -278,7 +298,7 @@ export default function TaskAIPanel({ taskId }) {
 
         <div>
           <p className="eyebrow">Task AI</p>
-          <h3>Ask about this task</h3>
+          <h3>Ask AI</h3>
         </div>
 
         {/* END CHAT BUTTON */}
@@ -294,7 +314,6 @@ export default function TaskAIPanel({ taskId }) {
               ? "Ending..."
               : "End Chat"}
         </button>
-
       </div>
 
 
@@ -345,8 +364,25 @@ export default function TaskAIPanel({ taskId }) {
 
       {/* ERROR */}
       {error && (
-        <div className="ai-error">
-          {error}
+        <div className="ai-error" role="alert">
+          <span>{error}</span>
+          {retryMessage && (
+            <button
+              type="button"
+              onClick={() => sendMessage(retryMessage, true)}
+              disabled={loading}
+            >
+              Retry request
+            </button>
+          )}
+        </div>
+      )}
+      {historyError && (
+        <div className="ai-error" role="alert">
+          <span>{historyError}</span>
+          <button type="button" onClick={() => setHistoryRetry((current) => current + 1)}>
+            Retry loading history
+          </button>
         </div>
       )}
 

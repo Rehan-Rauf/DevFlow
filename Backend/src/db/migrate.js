@@ -16,6 +16,36 @@ const pool = require("../config/database");
 
 // This function runs all SQL migration files.
 async function migrate() {
+  const identity = await pool.query(
+    `SELECT current_database() AS database_name, current_schema() AS schema_name,
+            inet_server_addr()::text AS server_address, inet_server_port() AS server_port`,
+  );
+  const {
+    database_name: databaseName,
+    schema_name: schemaName,
+    server_address: serverAddress,
+    server_port: serverPort,
+  } = identity.rows[0];
+  const expectedDatabaseName = process.env.DEVFLOW_EXPECTED_DATABASE_NAME;
+  const expectedSchemaName = process.env.DEVFLOW_EXPECTED_SCHEMA_NAME;
+  const expectedDatabaseAddress = process.env.DEVFLOW_EXPECTED_DATABASE_ADDRESS;
+  const expectedDatabasePort = process.env.DEVFLOW_EXPECTED_DATABASE_PORT;
+
+  if (expectedDatabaseName && databaseName !== expectedDatabaseName) {
+    throw new Error(`Connected to unexpected database "${databaseName}".`);
+  }
+  if (expectedSchemaName && schemaName !== expectedSchemaName) {
+    throw new Error(`Connected to unexpected schema "${schemaName}".`);
+  }
+  if (expectedDatabaseAddress && serverAddress?.split("/")[0] !== expectedDatabaseAddress) {
+    throw new Error(`Connected to unexpected PostgreSQL server address "${serverAddress}".`);
+  }
+  if (expectedDatabasePort && Number(serverPort) !== Number(expectedDatabasePort)) {
+    throw new Error(`Connected to unexpected PostgreSQL server port "${serverPort}".`);
+  }
+  console.log(
+    `Connected to PostgreSQL ${serverAddress}:${serverPort}, database ${databaseName}, schema ${schemaName}.`,
+  );
 
   // Create the path to the migrations folder.
   //
@@ -46,10 +76,21 @@ async function migrate() {
     .readdirSync(dir)
     .filter((file) => file.endsWith(".sql"))
     .sort();
+  const requestedFile = process.argv[2];
 
+  if (process.argv.length > 3) {
+    throw new Error("Specify at most one migration filename.");
+  }
+  if (requestedFile && (!/^\d{3}_[a-z0-9_]+\.sql$/.test(requestedFile) || !files.includes(requestedFile))) {
+    throw new Error("Requested migration must be an existing SQL filename in the migrations directory.");
+  }
 
-  // Loop through every migration file.
-  for (const file of files) {
+  const migrationsToRun = requestedFile
+    ? files.filter((file) => file === requestedFile)
+    : files;
+
+  // Apply the full ordered set, or one explicitly requested migration.
+  for (const file of migrationsToRun) {
 
     // Read the SQL file as text.
     //

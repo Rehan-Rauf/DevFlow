@@ -1,10 +1,32 @@
 import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import Button from "./ui/Button";
 import ConfirmDialog from "./ui/ConfirmDialog";
 import AIMemoryPanel from "./AIMemoryPanel";
-import { api } from "../services/api";
+import aiService from "../services/aiService";
 
-function AgentMessage({ role, content, memoriesUsed = 0 }) {
+const ACTION_SUGGESTIONS = [
+  "Change this task's status to Done",
+  "Set this task's priority to High",
+  "Show the other tasks in this project",
+];
+
+const CHANGE_LABELS = {
+  title: "Title",
+  description: "Description",
+  status: "Status",
+  priority: "Priority",
+  due_date: "Due date",
+  assignee_id: "Assignee ID",
+};
+
+function shownValue(value) {
+  if (value === null || value === undefined || value === "") return "None";
+  return String(value);
+}
+
+function AgentMessage({ role, content, memoriesUsed = 0, changes = [] }) {
   return (
     <div className={`task-agent-message task-agent-message--${role}`}>
       <span className="task-agent-message__label">
@@ -12,10 +34,26 @@ function AgentMessage({ role, content, memoriesUsed = 0 }) {
       </span>
 
       <div className="task-agent-message__bubble">
-        {content.split("\n").map((line, index) => (
-          <p key={index}>{line}</p>
-        ))}
+        {role === "user" ? content : (
+          <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+            {content}
+          </ReactMarkdown>
+        )}
       </div>
+      {role === "agent" && changes.map((change, index) => (
+        <div className="task-agent-change" key={`${change.type}-${change.task?.id}-${index}`}>
+          <strong>
+            {change.type === "created" ? "Created task" : "Updated task"}
+            {change.task?.title ? ` · ${change.task.title}` : ""}
+          </strong>
+          {change.type === "updated" && Object.entries(change.after || {}).map(([field, value]) => (
+            <span key={field}>
+              <b>{CHANGE_LABELS[field] || field}:</b>{" "}
+              {shownValue(change.before?.[field])} <span aria-hidden="true">→</span> {shownValue(value)}
+            </span>
+          ))}
+        </div>
+      ))}
       {role === "agent" && memoriesUsed > 0 && (
         <div className="ai-memory-used">Memory used · {memoriesUsed}</div>
       )}
@@ -36,6 +74,7 @@ export default function TaskAgentPanel({ taskId, onTaskDeleted }) {
   const [error, setError] = useState("");
   const [pendingConfirmation, setPendingConfirmation] = useState(null);
   const [memoryOpen, setMemoryOpen] = useState(false);
+  const [retryMessage, setRetryMessage] = useState("");
 
   const scrollRef = useRef(null);
 
@@ -45,7 +84,7 @@ export default function TaskAgentPanel({ taskId, onTaskDeleted }) {
     }
   }, [messages, loading, pendingConfirmation]);
 
-  async function askAgent(message, confirmationToken = null) {
+  async function askAgent(message, confirmationToken = null, confirmationAction = null, isRetry = false) {
     const trimmed = message.trim();
 
     if (!trimmed || loading) {
@@ -56,24 +95,26 @@ export default function TaskAgentPanel({ taskId, onTaskDeleted }) {
 
     // Add the user's normal message to the conversation.
     if (!confirmationToken) {
-      setMessages((current) => [
-        ...current,
-        {
-          role: "user",
-          content: trimmed,
-        },
-      ]);
-
+      if (!isRetry) {
+        setMessages((current) => [
+          ...current,
+          {
+            role: "user",
+            content: trimmed,
+          },
+        ]);
+      }
       setInput("");
     }
 
     setLoading(true);
 
     try {
-      const response = await api.taskAgent(
+      const response = await aiService.taskAgent(
         taskId,
         trimmed,
         confirmationToken,
+        confirmationAction,
       );
 
       const data = response.data || {};
@@ -82,14 +123,27 @@ export default function TaskAgentPanel({ taskId, onTaskDeleted }) {
         data.answer ||
         "The agent could not complete that request.";
 
+      setRetryMessage("");
       setMessages((current) => [
         ...current,
         {
           role: "agent",
           content: answer,
           memoriesUsed: data.memoriesUsed || 0,
+          changes: data.changes || [],
         },
       ]);
+
+      for (const change of data.changes || []) {
+        if (change.type === "created") {
+          window.dispatchEvent(new CustomEvent("devflow:task-created", {
+            detail: {
+              taskId: change.task?.id,
+              projectId: change.task?.project_id,
+            },
+          }));
+        }
+      }
 
       /*
        * Delete requires backend confirmation.
@@ -115,6 +169,10 @@ export default function TaskAgentPanel({ taskId, onTaskDeleted }) {
         onTaskDeleted?.();
       }
     } catch (requestError) {
+      if (!confirmationToken) {
+        setRetryMessage(trimmed);
+        setInput(trimmed);
+      }
       setError(
         requestError.message ||
           "The task agent is unavailable right now.",
@@ -163,17 +221,10 @@ export default function TaskAgentPanel({ taskId, onTaskDeleted }) {
     >
       <header className="task-agent-panel__header">
         <div>
-          <p className="eyebrow">Task agent</p>
-
-          <h2 id="task-agent-title">
-            Work with this task
-          </h2>
+          <p className="eyebrow">Take Action</p>
 
           <p>
-            Tell the agent what you want to do.
-            It can inspect, create, update, or
-            manage tasks using your authorized
-            project context.
+            Describe a change or ask to inspect this project.
           </p>
         </div>
 
@@ -195,47 +246,21 @@ export default function TaskAgentPanel({ taskId, onTaskDeleted }) {
       >
         {messages.length === 0 ? (
           <div className="task-agent-panel__empty">
-            <strong>What can I do?</strong>
-
-            <p>
-              Just describe what you want in normal
-              language.
-            </p>
-
-            <p>
-              For example:
-            </p>
-
-            <ul>
-              <li>
-                Create a new task called Fix Login API
-                with high priority.
-              </li>
-
-              <li>
-                Change this task status to done.
-              </li>
-
-              <li>
-                Update the description of this task.
-              </li>
-
-              <li>
-                Show me the other tasks in this project.
-              </li>
-
-              <li>
-                What is the current project about?
-              </li>
-
-              <li>
-                Delete this task.
-              </li>
-            </ul>
-
-            <p>
-              Destructive actions require confirmation.
-            </p>
+            <strong>What would you like to change?</strong>
+            <p>Actions run through your authorized project access. Deletions always need confirmation.</p>
+            <div className="task-agent-panel__suggestions">
+              {ACTION_SUGGESTIONS.map((suggestion) => (
+                <button
+                  key={suggestion}
+                  type="button"
+                  className="task-agent-panel__suggestion"
+                  onClick={() => askAgent(suggestion)}
+                  disabled={loading || Boolean(pendingConfirmation)}
+                >
+                  {suggestion}
+                </button>
+              ))}
+            </div>
           </div>
         ) : (
           messages.map((message, index) => (
@@ -259,7 +284,16 @@ export default function TaskAgentPanel({ taskId, onTaskDeleted }) {
           className="task-agent-panel__error"
           role="alert"
         >
-          {error}
+          <span>{error}</span>
+          {retryMessage && (
+            <button
+              type="button"
+              onClick={() => askAgent(retryMessage, null, null, true)}
+              disabled={loading}
+            >
+              Retry request
+            </button>
+          )}
         </div>
       )}
 
@@ -271,6 +305,7 @@ export default function TaskAgentPanel({ taskId, onTaskDeleted }) {
             askAgent(
               pendingConfirmation.message,
               pendingConfirmation.token,
+              pendingConfirmation.action,
             )
           }
           title="Delete task"

@@ -20,7 +20,12 @@ async function createOrganization(req, res) {
   const client = await pool.connect();
   try {
     const { name, description = "" } = req.body;
-    if (!name?.trim()) return fail(res, 400, "Organization name is required.");
+    if (typeof name !== "string" || !name.trim() || name.trim().length > 160) {
+      return fail(res, 400, "Organization name is required and must be 160 characters or fewer.");
+    }
+    if (typeof description !== "string") {
+      return fail(res, 400, "Organization description must be text.");
+    }
     await client.query("BEGIN");
     const result = await client.query(
       `INSERT INTO organizations (name, description, created_by)
@@ -90,7 +95,12 @@ async function updateOrganization(req, res) {
   try {
     await requireOrganizationOwner(req.user.id, req.params.id);
     const { name, description = "" } = req.body;
-    if (!name?.trim()) return fail(res, 400, "Organization name is required.");
+    if (typeof name !== "string" || !name.trim() || name.trim().length > 160) {
+      return fail(res, 400, "Organization name is required and must be 160 characters or fewer.");
+    }
+    if (typeof description !== "string") {
+      return fail(res, 400, "Organization description must be text.");
+    }
     const result = await pool.query(
       `UPDATE organizations SET name = $1, description = $2, updated_at = NOW()
        WHERE id = $3 RETURNING *`,
@@ -232,25 +242,48 @@ async function updateMember(req, res) {
 }
 
 async function removeMember(req, res) {
+  const client = await pool.connect();
   try {
-    const actor = await requireOrganizationAdminOrOwner(req.user.id, req.params.id);
-    const member = await pool.query(
-      `SELECT role FROM organization_members WHERE organization_id = $1 AND user_id = $2`,
+    await client.query("BEGIN");
+    const actor = await requireOrganizationAdminOrOwner(req.user.id, req.params.id, client);
+    const member = await client.query(
+      `SELECT role FROM organization_members
+       WHERE organization_id = $1 AND user_id = $2
+       FOR UPDATE`,
       [req.params.id, req.params.userId],
     );
-    if (!member.rowCount) return fail(res, 404, "Organization member not found.");
-    if (member.rows[0].role === "owner") return fail(res, 403, "Organization owner cannot be removed.");
+    if (!member.rowCount) {
+      await client.query("ROLLBACK");
+      return fail(res, 404, "Organization member not found.");
+    }
+    if (member.rows[0].role === "owner") {
+      await client.query("ROLLBACK");
+      return fail(res, 403, "Organization owner cannot be removed.");
+    }
     if (actor.role !== "owner" && member.rows[0].role !== "user") {
+      await client.query("ROLLBACK");
       return fail(res, 403, "Administrators can only remove users.");
     }
-    await pool.query(
+    await client.query(
+      `DELETE FROM project_members pm
+       USING projects p
+       WHERE pm.project_id = p.id
+         AND p.organization_id = $1
+         AND pm.user_id = $2`,
+      [req.params.id, req.params.userId],
+    );
+    await client.query(
       `DELETE FROM organization_members WHERE organization_id = $1 AND user_id = $2`,
       [req.params.id, req.params.userId],
     );
+    await client.query("COMMIT");
     return ok(res, null, "Member removed.");
   } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
     console.error("Remove member error:", error);
     return fail(res, error.status || 500, error.status ? error.message : "Unable to remove member.");
+  } finally {
+    client.release();
   }
 }
 
@@ -331,7 +364,7 @@ async function acceptInvitationAndCreateAccount(req, res) {
     }
 
     const existing = await client.query(
-      `SELECT id, name, email, password, role, status, created_at
+      `SELECT id, name, email, password, role, status, auth_version, created_at
        FROM users WHERE lower(email) = lower($1) FOR UPDATE`,
       [invitation.email],
     );
@@ -358,7 +391,7 @@ async function acceptInvitationAndCreateAccount(req, res) {
       const userResult = await client.query(
         `INSERT INTO users (name, email, password)
          VALUES ($1, lower($2), $3)
-         RETURNING id, name, email, role, status, created_at`,
+         RETURNING id, name, email, role, status, auth_version, created_at`,
         [name, invitation.email, hashedPassword],
       );
       user = userResult.rows[0];

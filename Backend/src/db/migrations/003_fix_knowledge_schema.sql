@@ -15,16 +15,15 @@
 -- Result: every embedding insert and every vector search
 -- throws "relation knowledge_embeddings does not exist".
 --
--- This migration removes the unused/broken table and creates
--- ONE correct knowledge table that matches the code.
+-- This migration creates the knowledge table used by the code, while retaining
+-- the original knowledge_base table for installations that may still have data.
 -- ============================================================
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- The old table was never successfully written to (every
--- insert would have failed against knowledge_embeddings
--- instead), so there is no real data to migrate out of it.
-DROP TABLE IF EXISTS knowledge_base;
+-- Keep the legacy knowledge_base table intact. Even if current application
+-- code no longer reads it, dropping it here would destroy data on every
+-- migration run for installations that still have records in it.
 
 
 -- ============================================================

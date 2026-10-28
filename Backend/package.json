@@ -4,10 +4,13 @@
   "private": true,
   "main": "src/server.js",
   "scripts": {
-    "dev": "nodemon src/server.js",
+    "dev": "node --watch src/server.js",
     "start": "node src/server.js",
+    "test": "node --test",
+    "test:unit": "node --test test/agentToolSecurity.test.js test/socketIoConfiguration.test.js test/taskRoomAuthorization.test.js test/validation.test.js",
+    "test:integration": "node --test test/databaseWorkflow.integration.test.js",
+    "test:integration:isolated": "node test-support/runIsolatedDatabaseChecks.js",
     "db:migrate": "node src/db/migrate.js",
-    "migrate": "node-pg-migrate",
     "knowledge:index": "node src/scripts/indexKnowledge.js"
   },
   "dependencies": {
@@ -18,11 +21,10 @@
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
-    "node-pg-migrate": "^9.0.0",
     "pg": "^8.13.1",
     "socket.io": "^4.8.1"
   },
   "devDependencies": {
-    "nodemon": "^3.1.9"
+    "socket.io-client": "^4.8.4"
   }
 }

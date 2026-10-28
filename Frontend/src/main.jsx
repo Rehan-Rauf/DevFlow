@@ -8,6 +8,7 @@ import "./styles/base.css";
 import "./styles/ai-memory.css";
 import App from "./App";
 import { ThemeProvider } from "./context/ThemeContext";
+import "./styles/workspace.css";
 
 
 ReactDOM.createRoot(document.getElementById("root")).render(

@@ -36,8 +36,11 @@ async function projectAccess(userId, projectId) {
     `SELECT p.id, p.organization_id,
       EXISTS (SELECT 1 FROM organization_members om WHERE om.organization_id = p.organization_id AND om.user_id = $1 AND om.role = 'owner') AS is_org_owner,
       EXISTS (SELECT 1 FROM organization_members om WHERE om.organization_id = p.organization_id AND om.user_id = $1 AND om.role IN ('owner', 'admin')) AS is_org_admin,
-      EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.id AND pm.user_id = $1) AS is_member,
-      EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.id AND pm.user_id = $1 AND pm.role = 'project_admin') AS is_project_admin
+      EXISTS (SELECT 1 FROM organization_members om WHERE om.organization_id = p.organization_id AND om.user_id = $1) AS is_org_member,
+      EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.id AND pm.user_id = $1
+        AND EXISTS (SELECT 1 FROM organization_members om WHERE om.organization_id = p.organization_id AND om.user_id = pm.user_id)) AS is_member,
+      EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.id AND pm.user_id = $1 AND pm.role = 'project_admin'
+        AND EXISTS (SELECT 1 FROM organization_members om WHERE om.organization_id = p.organization_id AND om.user_id = pm.user_id)) AS is_project_admin
      FROM projects p WHERE p.id = $2`,
     [userId, projectId],
   );
@@ -51,7 +54,7 @@ async function requireProjectAdmin(userId, projectId) {
     error.status = 404;
     throw error;
   }
-  if (!access.is_org_owner && !access.is_project_admin) {
+  if (!access.is_org_member || (!access.is_org_owner && !access.is_project_admin)) {
     const error = new Error("Project administrator permission required.");
     error.status = 403;
     throw error;
@@ -80,7 +83,7 @@ async function listStatuses(req, res) {
   try {
     const access = await projectAccess(req.user.id, req.params.id);
     if (!access) return fail(res, 404, "Project not found.");
-    if (!access.is_org_owner && !access.is_member) return fail(res, 403, "Project access required.");
+    if (!access.is_org_member || (!access.is_org_owner && !access.is_member)) return fail(res, 403, "Project access required.");
     const result = await pool.query(
       `SELECT id, project_id, key, label, color, position, created_at, updated_at
        FROM project_statuses WHERE project_id = $1 ORDER BY position, id`,
@@ -187,7 +190,7 @@ async function listRoleTags(req, res) {
   try {
     const access = await projectAccess(req.user.id, req.params.id);
     if (!access) return fail(res, 404, "Project not found.");
-    if (!access.is_member) return fail(res, 403, "Project access required.");
+    if (!access.is_org_member || !access.is_member) return fail(res, 403, "Project access required.");
     const result = await pool.query(`SELECT * FROM task_role_tags WHERE project_id = $1 ORDER BY label`, [req.params.id]);
     return ok(res, result.rows);
   } catch (error) {

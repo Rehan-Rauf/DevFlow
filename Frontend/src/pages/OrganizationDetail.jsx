@@ -63,6 +63,17 @@ export default function OrganizationDetail() {
 
   useEffect(() => {
     loadOrganization();
+    const handleAIAction = (event) => {
+      const resource = event.detail?.resource;
+      if (
+        event.detail?.resourceType === "project"
+        && String(resource?.organization_id) === String(id)
+      ) {
+        loadOrganization();
+      }
+    };
+    window.addEventListener("devflow:ai-action-completed", handleAIAction);
+    return () => window.removeEventListener("devflow:ai-action-completed", handleAIAction);
   }, [id]);
 
   const saveOrganization = async (event) => {

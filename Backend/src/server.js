@@ -15,6 +15,15 @@ const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const { Server } = require("socket.io");
 const { isTokenRevoked } = require("./middleware/authMiddleware");
+const { assertTaskAccess } = require("./services/retrievalService");
+const { emitTaskChanged } = require("./services/taskEventDelivery");
+const { assertSingleSocketIoInstance } = require("./services/socketIoConfiguration");
+const {
+  emitToAuthorizedTaskRoom,
+  registerTaskRoomHandlers,
+} = require("./services/taskRoomAuthorization");
+
+assertSingleSocketIoInstance();
 
 
 // Routes
@@ -52,6 +61,42 @@ const io = new Server(httpServer, {
   }
 });
 
+async function authorizeSocketSession(socket) {
+  if (!socket.authToken) {
+    const error = new Error("Authentication token is missing.");
+    error.status = 401;
+    throw error;
+  }
+  let payload;
+  try {
+    payload = jwt.verify(socket.authToken, process.env.JWT_SECRET);
+  } catch {
+    const error = new Error("Authentication token is invalid or expired.");
+    error.status = 401;
+    throw error;
+  }
+  if (
+    Number(payload.id) !== Number(socket.user?.id)
+    || await isTokenRevoked(socket.authToken, payload)
+  ) {
+    const error = new Error("Authentication token has been revoked.");
+    error.status = 401;
+    throw error;
+  }
+}
+
+async function authorizeTaskSocketAccess(userId, taskId, socket) {
+  await authorizeSocketSession(socket);
+  return assertTaskAccess(userId, taskId);
+}
+
+app.set("authorizeTaskSocketAccess", authorizeTaskSocketAccess);
+app.set("emitTaskChanged", (taskId, options = {}) => emitTaskChanged(io, taskId, {
+  ...options,
+  authorizeTaskAccess: authorizeTaskSocketAccess,
+  authorizeSocketSession,
+}));
+
 
 // ===============================
 // SOCKET AUTHENTICATION
@@ -72,17 +117,22 @@ io.use(async (socket, next) => {
     }
 
     // Check JWT token
-    const user = jwt.verify(
+    const payload = jwt.verify(
       token,
       process.env.JWT_SECRET
     );
 
-    if (await isTokenRevoked(token)) {
+    if (await isTokenRevoked(token, payload)) {
       return next(new Error("Authentication token has been revoked"));
     }
 
     // Save user information inside socket
-    socket.user = user;
+    socket.authToken = token;
+    socket.authPayload = payload;
+    socket.user = {
+      id: Number(payload.id),
+      role: payload.role,
+    };
 
     // Allow connection
     next();
@@ -133,34 +183,7 @@ io.on("connection", (socket) => {
   }
 
 
-  // =============================
-  // JOIN TASK ROOM
-  // =============================
-
-  socket.on("join_task", (taskId) => {
-
-    socket.join(`task:${taskId}`);
-
-    console.log(
-      `User joined task:${taskId}`
-    );
-
-  });
-
-
-  // =============================
-  // LEAVE TASK ROOM
-  // =============================
-
-  socket.on("leave_task", (taskId) => {
-
-    socket.leave(`task:${taskId}`);
-
-    console.log(
-      `User left task:${taskId}`
-    );
-
-  });
+  registerTaskRoomHandlers(socket, authorizeTaskSocketAccess);
 
 
   // =============================

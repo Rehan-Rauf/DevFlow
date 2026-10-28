@@ -19,10 +19,10 @@
 .sidebar * { box-sizing: border-box; }
 
 [data-theme="light"] .sidebar {
-  background: linear-gradient(180deg, var(--surface-strong), var(--surface));
+  background: var(--shell-background);
   border-color: var(--border);
   color: var(--text);
-  box-shadow: 0 0 0 1px var(--border), 14px 0 36px var(--shadow);
+  box-shadow: none;
 }
 .brand {
   display: flex; gap: 11px; align-items: center;
@@ -179,242 +179,116 @@
   color: var(--text);
   min-width: 0;
   overflow-x: hidden;
-  padding-bottom: 88px;
+  padding-bottom: 108px;
 }
 
-/* When the Global AI Assistant is open on desktop, reflow page content out
-   from under the docked panel instead of letting it sit visually underneath
-   (see .ai-global-overlay in ai-global.css for the matching click-through fix). */
-@media (min-width: 1000px) {
-  .main-content--ai-open {
-    padding-right: 462px;
-    transition: padding-right .2s ease;
-  }
-}
-
-.screen-loader { min-height: 100vh; display: grid; place-items: center; color: var(--muted); background: var(--bg); }
-
-/* =========================================================
-   FLOATING AI ASSISTANT
-   RIGHT BOTTOM
-   ========================================================= */
-
-.gai-launcher {
-  position: fixed;
-
-  right: max(16px, env(safe-area-inset-right));
-  bottom: max(16px, env(safe-area-inset-bottom));
-
-  width: 54px;
-  height: 54px;
-
-  display: grid;
-  place-items: center;
-
-  border: 1px solid var(--border-strong);
-  border-radius: 50%;
-
-  background: var(--accent);
-
-  color: var(--surface);
-
-  font-size: 23px;
-  font-weight: 700;
-
-  cursor: pointer;
-
-  /* Sits above ordinary page content but below every modal/overlay layer
-     (command palette, task/org/status modals, AI create modal, mobile
-     nav) so it never floats on top of dialogs or covers their actions. */
-  z-index: 45;
-
-  box-shadow:
-    0 8px 25px var(--shadow),
-    0 0 25px color-mix(in srgb, var(--accent) 25%, transparent);
-
-  transition:
-    transform 0.2s ease,
-    box-shadow 0.2s ease,
-    background 0.2s ease;
-}
-
-
-.gai-launcher:hover {
-  transform: scale(1.08);
-
-  box-shadow:
-    0 10px 30px var(--shadow),
-    0 0 35px color-mix(in srgb, var(--accent) 40%, transparent);
-}
-
-
-.gai-launcher:active {
-  transform: scale(0.96);
-}
-
-
-/* =========================================================
-   FANCY BREADCRUMB
-   ========================================================= */
-
-.workspace-breadcrumb {
-  height: 58px;
-
+.topbar {
+  height: 56px;
+  min-height: 56px;
   display: flex;
   align-items: center;
-
-  gap: 10px;
-
-  padding: 0 40px;
-
+  gap: 14px;
+  padding: 0 22px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
   border-bottom: 1px solid var(--border);
-
-  background:
-    linear-gradient(
-      180deg,
-      var(--surface-strong),
-      var(--surface)
-    );
-
-  position: relative;
+  background: var(--shell-background);
+  color: var(--text);
 }
 
-
-.workspace-breadcrumb::after {
-  content: "";
-
-  position: absolute;
-
-  left: 40px;
-  right: 40px;
-  bottom: 0;
-
-  height: 1px;
-
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(130, 120, 255, 0.35),
-    transparent
-  );
+.topbar-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-
-/* Organizations link */
-
-.breadcrumb-back {
-  display: inline-flex;
-
+.topbar-actions {
+  display: flex;
   align-items: center;
+  gap: 9px;
+  margin-left: auto;
+}
 
+.topbar-create-task,
+.topbar-ai-agent {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   gap: 7px;
-
-  padding: 7px 10px;
-
+  padding: 0 11px;
+  border: 1px solid var(--border);
   border-radius: 8px;
-
-  color: #858d9c;
-
-  font-size: 12px;
-
-  font-weight: 600;
-
-  text-decoration: none;
-
-  transition:
-    color 0.18s ease,
-    background 0.18s ease,
-    transform 0.18s ease;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  transition: background .16s ease, border-color .16s ease, box-shadow .16s ease;
 }
 
-
-.breadcrumb-back:hover {
-  color: #ffffff;
-
-  background: #181b23;
-
-  transform: translateX(-2px);
+.topbar-create-task {
+  background: var(--surface-strong);
 }
 
-
-/* Arrow */
-
-.breadcrumb-arrow {
-  font-size: 16px;
-
-  color: #a49cff;
-
+.topbar-create-task > span:first-child {
+  color: var(--accent);
+  font-size: 18px;
   line-height: 1;
 }
 
-
-/* / divider */
-
-.breadcrumb-divider {
-  color: #3c424d;
-
-  font-size: 13px;
+.topbar-ai-agent {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
+  background: linear-gradient(110deg, color-mix(in srgb, var(--accent) 17%, var(--surface-strong)), var(--surface-strong));
 }
 
+.topbar-ai-agent > span:first-child {
+  color: var(--accent);
+  font-size: 14px;
+}
 
-/* Current page */
+.topbar-create-task:hover,
+.topbar-create-task:focus-visible,
+.topbar-ai-agent:hover,
+.topbar-ai-agent:focus-visible,
+.topbar-ai-agent.is-active {
+  border-color: color-mix(in srgb, var(--accent) 58%, var(--border-strong));
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-strong));
+}
 
-.breadcrumb-current {
-  display: inline-flex;
+.topbar-create-task:focus-visible,
+.topbar-ai-agent:focus-visible,
+.menu-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
-  align-items: center;
-
-  min-height: 28px;
-
-  padding: 5px 10px;
-
-  border: 1px solid #292e39;
-
-  border-radius: 7px;
-
-  background: #13161c;
-
-  color: #dfe3eb;
-
+.topbar-user {
+  margin-left: 4px;
+  color: var(--muted);
   font-size: 11px;
-
-  font-weight: 700;
-
-  letter-spacing: 0.02em;
-
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.025);
+  white-space: nowrap;
 }
 
-
-/* =========================================================
-   MOBILE
-   ========================================================= */
-
-@media (max-width: 700px) {
-
-  .gai-launcher {
-    right: max(14px, env(safe-area-inset-right));
-    bottom: max(14px, env(safe-area-inset-bottom));
-
-    width: 50px;
-    height: 50px;
-  }
-
-
-  .workspace-breadcrumb {
-    height: 52px;
-
-    padding: 0 18px;
-  }
-
-
-  .workspace-breadcrumb::after {
-    left: 18px;
-    right: 18px;
-  }
-
+.menu-btn {
+  display: none;
 }
+
+.sidebar {
+  background: var(--shell-background);
+  border-right-color: var(--border);
+  box-shadow: none;
+}
+
+.ai-global-header {
+  background: var(--shell-background);
+}
+
+.screen-loader { min-height: 100vh; display: grid; place-items: center; color: var(--muted); background: var(--bg); }
 
 /* =========================================================
    SIDEBAR / RECENT CHAT STABILITY
@@ -526,11 +400,10 @@
 
     margin-right: 10px;
 
-    border: 1px solid #292e39;
+    border: 1px solid var(--border);
     border-radius: 8px;
-
-    background: #13161c;
-    color: #dfe3eb;
+    background: var(--surface-strong);
+    color: var(--text);
 
     cursor: pointer;
   }
@@ -539,13 +412,13 @@
     font-size: 12px;
   }
 
-  .workspace-breadcrumb {
-    padding: 0 16px;
-  }
+  .topbar-actions { gap: 6px; }
 
-  .workspace-breadcrumb::after {
-    left: 16px;
-    right: 16px;
+  .topbar-create-task,
+  .topbar-ai-agent {
+    min-width: 36px;
+    min-height: 36px;
+    padding: 0 9px;
   }
 
 }
@@ -559,20 +432,21 @@
 
   .topbar {
     height: 54px;
+    min-height: 54px;
+    gap: 8px;
     padding: 0 12px;
   }
 
-  .topbar-user {
-    display: none;
+  .topbar-create-task > span:last-child,
+  .topbar-ai-agent > span:last-child {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
   }
 
-  .cmdk-hint {
-    margin-left: auto;
-  }
-
-  .workspace-breadcrumb {
-    height: 50px;
-    padding: 0 12px;
-  }
+  .topbar-actions { margin-left: auto; }
 
 }

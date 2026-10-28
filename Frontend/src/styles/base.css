@@ -164,6 +164,7 @@ h3 { margin-bottom: 0; font-size: 14px; }
   --success: #59d68c;
   --warning: #d7b66f;
   --shadow: rgba(0, 0, 0, .28);
+  --shell-background: color-mix(in srgb, var(--surface-strong) 88%, var(--surface));
 }
 
 [data-theme="light"] {
@@ -210,8 +211,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
 /* Shared legacy surfaces are mapped onto the tokens above so old page styles
    participate in both themes without a framework rewrite. */
 .app-shell, .main-content, .screen-loader, .page, .dashboard { color: var(--text); }
-.sidebar { background: color-mix(in srgb, var(--surface) 94%, transparent); border-color: var(--border); }
-.topbar { background: color-mix(in srgb, var(--bg) 88%, transparent); border-color: var(--border); }
+.sidebar, .topbar { background: var(--shell-background); border-color: var(--border); }
 .workspace-pill, .section-card, .ui-card, .ui-modal, .kanban-column, .task-card,
 .dash-stat, .dash-project-row:hover, .dash-task-row:hover, .ai-message-assistant .ai-message-bubble,
 .ai-source-chip, .ai-suggestion-chip { background: var(--surface); border-color: var(--border); color: var(--text); }

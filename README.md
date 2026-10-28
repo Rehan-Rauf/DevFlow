@@ -42,21 +42,10 @@ Create a PostgreSQL database named:
 
 cms
 
-Then copy:
-
-Backend/.env.example -> Backend/.env
-
-Set your PostgreSQL password.
-
-Example:
-
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=cms
-DB_USER=postgres
-DB_PASSWORD=YOUR_PASSWORD
-JWT_SECRET=use_a_long_random_secret
-FRONTEND_URL=http://localhost:5173
+Copy `Backend/.env.example` to `Backend/.env` and set your local PostgreSQL
+password and a unique `JWT_SECRET`. Keep `.env` private and out of version
+control. OpenRouter and SendGrid settings are optional; their features require
+valid provider credentials.
 
 ## Start backend
 
@@ -79,7 +68,7 @@ cd Frontend
 npm install
 
 Optional:
-copy Frontend/.env.example to Frontend/.env
+copy `Frontend/.env.example` to `Frontend/.env` to override the API/socket URLs.
 
 Then:
 

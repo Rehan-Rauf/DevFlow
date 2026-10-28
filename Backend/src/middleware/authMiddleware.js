@@ -8,7 +8,7 @@ function hashToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
-async function isTokenRevoked(token) {
+async function isTokenRevoked(token, payload) {
   const result = await pool.query(
     `SELECT 1
      FROM revoked_auth_tokens
@@ -17,7 +17,16 @@ async function isTokenRevoked(token) {
      LIMIT 1`,
     [hashToken(token)],
   );
-  return result.rowCount > 0;
+  if (result.rowCount) return true;
+
+  if (payload?.id === undefined) return false;
+  const userResult = await pool.query(
+    "SELECT status, auth_version FROM users WHERE id = $1",
+    [payload.id],
+  );
+  return !userResult.rowCount
+    || userResult.rows[0].status !== "active"
+    || Number(userResult.rows[0].auth_version) !== Number(payload.authVersion ?? 0);
 }
 
 
@@ -80,7 +89,7 @@ async function requireAuth(req, res, next) {
       process.env.JWT_SECRET
     );
 
-    if (await isTokenRevoked(token)) {
+    if (await isTokenRevoked(token, payload)) {
       return res.status(401).json({
         success: false,
         message: "Authentication token has been revoked.",

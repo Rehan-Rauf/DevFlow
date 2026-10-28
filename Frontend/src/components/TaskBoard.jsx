@@ -76,7 +76,7 @@ export default function TaskBoard({
   };
 
   return (
-    <div className={`kanban-scroll-shell ${fixedHeight ? "kanban-scroll-shell--fixed" : ""}`}>
+    <div className={`kanban-scroll-shell${fixedHeight ? " kanban-scroll-shell--fixed" : ""}${workflow.length === 1 ? " kanban-scroll-shell--single" : ""}`}>
       {boardHeaderActions && (
         <div className="kanban-board-actions">
           {boardHeaderActions}

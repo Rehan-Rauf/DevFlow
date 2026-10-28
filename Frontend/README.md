@@ -6,7 +6,7 @@ npm install
 
 ## Configure
 
-Copy `.env.example` to `.env` if you need a custom API URL.
+Copy `.env.example` to `.env` if you need to override the API or Socket.IO URL.
 
 ## Run
 

@@ -1,5 +1,6 @@
 // // Import PostgreSQL database connection/pool
 const pool = require("../config/database");
+const { isPositiveIntegerId } = require("../utils/validation");
 
 // Import response helper functions
 // ok = successful response
@@ -215,12 +216,21 @@ async function createProject(req, res) {
     // Get data sent from frontend.
     const { organizationId, name, description = "" } = req.body;
 
+    if (!isPositiveIntegerId(organizationId)) {
+      return fail(res, 400, "A valid organization ID is required.");
+    }
+
     // Check whether logged-in user
     // is an admin of this organization.
     await requireOrgAdmin(req.user.id, organizationId);
 
     // Project name is required.
-    if (!name?.trim()) return fail(res, 400, "Project name is required.");
+    if (typeof name !== "string" || !name.trim() || name.trim().length > 160) {
+      return fail(res, 400, "Project name is required and must be 160 characters or fewer.");
+    }
+    if (typeof description !== "string") {
+      return fail(res, 400, "Project description must be text.");
+    }
 
     // Insert project into projects table.
     await client.query("BEGIN");
@@ -449,6 +459,10 @@ async function updateProject(req, res) {
         EXISTS (
           SELECT 1 FROM project_members pm
           WHERE pm.project_id = $3 AND pm.user_id = $2 AND pm.role = 'project_admin'
+            AND EXISTS (
+              SELECT 1 FROM organization_members om
+              WHERE om.organization_id = $1 AND om.user_id = pm.user_id
+            )
         ) AS is_project_admin`,
       [project.rows[0].organization_id, req.user.id, id],
     );
@@ -463,7 +477,15 @@ async function updateProject(req, res) {
     const { name, description = "", status = "active" } = req.body;
 
     // Project name is required.
-    if (!name?.trim()) return fail(res, 400, "Project name is required.");
+    if (typeof name !== "string" || !name.trim() || name.trim().length > 160) {
+      return fail(res, 400, "Project name is required and must be 160 characters or fewer.");
+    }
+    if (typeof description !== "string") {
+      return fail(res, 400, "Project description must be text.");
+    }
+    if (!["active", "completed", "archived"].includes(status)) {
+      return fail(res, 400, "Invalid project status.");
+    }
 
     // Update project in database.
     const result = await pool.query(
@@ -521,6 +543,10 @@ async function deleteProject(req, res) {
         EXISTS (
           SELECT 1 FROM project_members pm
           WHERE pm.project_id = $3 AND pm.user_id = $2 AND pm.role = 'project_admin'
+            AND EXISTS (
+              SELECT 1 FROM organization_members om
+              WHERE om.organization_id = $1 AND om.user_id = pm.user_id
+            )
         ) AS is_project_admin`,
       [project.rows[0].organization_id, req.user.id, id],
     );
@@ -584,6 +610,10 @@ async function listMembers(req, res) {
         EXISTS (
           SELECT 1 FROM project_members pm
           WHERE pm.project_id = $3 AND pm.user_id = $2
+            AND EXISTS (
+              SELECT 1 FROM organization_members om
+              WHERE om.organization_id = $1 AND om.user_id = pm.user_id
+            )
         ) AS is_project_member`,
       [organizationId, req.user.id, id],
     );
@@ -600,6 +630,10 @@ async function listMembers(req, res) {
          u.email
        FROM project_members pm
        INNER JOIN users u ON u.id = pm.user_id
+       JOIN projects p ON p.id = pm.project_id
+       JOIN organization_members om
+         ON om.organization_id = p.organization_id
+        AND om.user_id = pm.user_id
        WHERE pm.project_id = $1
        ORDER BY u.name`,
       [id],
@@ -648,6 +682,10 @@ async function addMember(req, res) {
         EXISTS (
           SELECT 1 FROM project_members pm
           WHERE pm.project_id = $3 AND pm.user_id = $2 AND pm.role = 'project_admin'
+            AND EXISTS (
+              SELECT 1 FROM organization_members om
+              WHERE om.organization_id = $1 AND om.user_id = pm.user_id
+            )
         ) AS is_project_admin`,
       [project.rows[0].organization_id, req.user.id, id],
     );
@@ -762,6 +800,10 @@ async function removeMember(req, res) {
         EXISTS (
           SELECT 1 FROM project_members pm
           WHERE pm.project_id = $3 AND pm.user_id = $2 AND pm.role = 'project_admin'
+            AND EXISTS (
+              SELECT 1 FROM organization_members om
+              WHERE om.organization_id = $1 AND om.user_id = pm.user_id
+            )
         ) AS is_project_admin`,
       [project.rows[0].organization_id, req.user.id, id],
     );

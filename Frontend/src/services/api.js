@@ -568,10 +568,10 @@ export const api = {
 
   // The task agent receives its task/project scope from the server. A
   // confirmation token is only supplied after the agent requests deletion.
-  taskAgent: (taskId, message, confirmationToken = null) =>
+  taskAgent: (taskId, message, confirmationToken = null, confirmationAction = null) =>
     request(`/ai/task/${taskId}/agent`, {
       method: "POST",
-      body: JSON.stringify({ message, confirmationToken }),
+      body: JSON.stringify({ message, confirmationToken, confirmationAction }),
     }),
 
 
@@ -587,10 +587,10 @@ export const api = {
 
   // POST /ai/global/chat
 
-  globalChat: (message, context = null) =>
+  globalChat: (message, context = null, requestId) =>
     request(`/ai/global/chat`, {
       method: "POST",
-      body: JSON.stringify({ message, context }),
+      body: JSON.stringify({ message, context, requestId }),
     }),
 
 
@@ -598,6 +598,19 @@ export const api = {
 
   globalChatHistory: () =>
     request(`/ai/global/chat/history`),
+
+  globalActionProposals: (sessionId = null) => {
+    const params = new URLSearchParams();
+    if (sessionId) params.set("sessionId", sessionId);
+    const query = params.toString();
+    return request(`/ai/global/proposals${query ? `?${query}` : ""}`);
+  },
+
+  approveGlobalAction: (proposalId) =>
+    request(`/ai/global/proposals/${proposalId}/approve`, { method: "POST" }),
+
+  cancelGlobalAction: (proposalId) =>
+    request(`/ai/global/proposals/${proposalId}/cancel`, { method: "POST" }),
 
 
   // ======================================================
@@ -623,6 +636,11 @@ export const api = {
       method: "POST",
     }),
 
+  closeAllChats: () =>
+    request(`/ai/chats/end-all`, {
+      method: "POST",
+    }),
+
   memories: (filters = {}) => {
     const params = new URLSearchParams(
       Object.entries(filters).filter(([, value]) => value !== undefined && value !== null && value !== ""),
@@ -645,6 +663,9 @@ export const api = {
   deleteMemory: (id) =>
     request(`/ai/memories/${id}`, { method: "DELETE" }),
 
+  clearMemories: () =>
+    request("/ai/memories", { method: "DELETE" }),
+
   searchMemories: (query, scope = {}) =>
     request(`/ai/memories/search?${new URLSearchParams({ query, ...scope })}`),
 
@@ -659,6 +680,9 @@ export const api = {
 
 recentChats: () =>
   request(`/ai/chats/recent`),
+
+deleteChatSession: (sessionId) =>
+  request(`/ai/chats/${sessionId}`, { method: "DELETE" }),
 
 // GET one saved AI chat session history.
 chatSessionHistory: (sessionId) =>

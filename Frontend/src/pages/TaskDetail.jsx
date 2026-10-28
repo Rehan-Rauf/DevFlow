@@ -2,8 +2,6 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../services/api";
 import { io } from "socket.io-client";
-import TaskAIPanel from "../components/TaskAIPanel";
-import TaskAgentPanel from "../components/TaskAgentPanel";
 import ConfirmDialog from "../components/ui/ConfirmDialog";
 import "../styles/task-detail.css";
 
@@ -74,6 +72,9 @@ export default function TaskDetail() {
     });
 
     socket.on("task_changed", load);
+    socket.on("task_room_error", (roomError) => {
+      setError(roomError.message || "Unable to subscribe to task updates.");
+    });
 
     return () => {
       socket.emit("leave_task", id);
@@ -170,49 +171,91 @@ export default function TaskDetail() {
 
   return (
     <section className="page task-page">
-      {/* ==================================================
-          TASK HERO
-          ================================================== */}
-      <div className="task-hero">
-        <div className="task-hero-main">
-          <Link
-            to={`/projects/${task.project_id}`}
-            className="task-project-back"
-          >
-            <span className="task-project-back-arrow">←</span>
-            <span>{task.project_name || "Project"}</span>
-          </Link>
+      <nav className="task-detail-breadcrumb" aria-label="Task breadcrumbs">
+        <Link to="/tasks">Tasks</Link>
+        <span aria-hidden="true">/</span>
+        <Link to={`/projects/${task.project_id}`}>{task.project_name || "Project"}</Link>
+        <span aria-hidden="true">/</span>
+        <span className="task-detail-breadcrumb__id">TASK-{task.id}</span>
+      </nav>
 
-          <div className="task-heading-meta">
-            <span className="task-id-pill">TASK-{task.id}</span>
-
-            <span className="task-state-pill" style={{ color: statusColor, borderColor: statusColor, backgroundColor: `${statusColor}18` }}>
-              <span className="task-state-dot" />
-              {task.status_label || formatStatus(task.status)}
-            </span>
-
-            {task.role_tag_label && <span className="role-tag-badge">{task.role_tag_label}</span>}
-
-            <span
-              className={`task-priority-pill priority-${
-                task.priority || "no_priority"
-              }`}
-            >
-              {formatPriority(task.priority)}
-            </span>
-          </div>
-
-          <h1>{task.title}</h1>
-
-          <p className="muted">{task.description || "No description"}</p>
-        </div>
-      </div>
-
-      {/* ==================================================
-          CONTENT
-          ================================================== */}
       <div className="detail-grid">
         <div className="detail-main">
+          <div className="task-hero">
+            <div className="task-hero-main">
+              <div className="task-heading-meta">
+                <span className="task-state-pill" style={{ color: statusColor, borderColor: statusColor, backgroundColor: `${statusColor}18` }}>
+                  <span className="task-state-dot" />
+                  {task.status_label || formatStatus(task.status)}
+                </span>
+
+                {task.role_tag_label && <span className="role-tag-badge">{task.role_tag_label}</span>}
+              </div>
+
+              <h1>{task.title}</h1>
+              <p className="muted">{task.description || "No description"}</p>
+            </div>
+          </div>
+        </div>
+
+        <aside className="detail-side">
+          <div className="section-card task-details-card">
+            <p className="eyebrow">Details</p>
+
+            <div className="side-row">
+              <span>Organization</span>
+              <b>{task.organization_name}</b>
+            </div>
+
+            <div className="side-row">
+              <span>Project</span>
+              <b>{task.project_name}</b>
+            </div>
+
+            <div className="side-row">
+              <span>Assignee</span>
+              <b>{task.assignee_name || "Unassigned"}</b>
+            </div>
+
+            <div className="side-row">
+              <span>Created by</span>
+              <b>{task.creator_name}</b>
+            </div>
+
+            <div className="side-row">
+              <span>Due date</span>
+              <b>{task.due_date || "No due date"}</b>
+            </div>
+
+            <div className="side-row">
+              <span>Status</span>
+              <b>{task.status_label || formatStatus(task.status)}</b>
+            </div>
+
+            <div className="side-row">
+              <span>Priority</span>
+              <b>{formatPriority(task.priority)}</b>
+            </div>
+
+            <div className="side-row">
+              <span>Role tag</span>
+              <b>{task.role_tag_label || "None"}</b>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            className="task-agent-open-button"
+            onClick={() => window.dispatchEvent(new CustomEvent("devflow:open-task-agent", {
+              detail: { entityType: "task", entityId: Number(task.id) },
+            }))}
+          >
+            <span aria-hidden="true">✦</span>
+            Open Task Agent
+          </button>
+        </aside>
+
+        <div className="detail-conversation">
           <div className="section-card task-comments-card">
             <div className="section-header">
               <div>
@@ -254,49 +297,6 @@ export default function TaskDetail() {
             </form>
           </div>
         </div>
-
-        <aside className="detail-side">
-          <div className="section-card task-details-card">
-            <p className="eyebrow">Details</p>
-
-            <div className="side-row">
-              <span>Organization</span>
-              <b>{task.organization_name}</b>
-            </div>
-
-            <div className="side-row">
-              <span>Project</span>
-              <b>{task.project_name}</b>
-            </div>
-
-            <div className="side-row">
-              <span>Assignee</span>
-              <b>{task.assignee_name || "Unassigned"}</b>
-            </div>
-
-            <div className="side-row">
-              <span>Created by</span>
-              <b>{task.creator_name}</b>
-            </div>
-
-            <div className="side-row">
-              <span>Due date</span>
-              <b>{task.due_date || "No due date"}</b>
-            </div>
-
-            <div className="side-row">
-              <span>Role tag</span>
-              <b>{task.role_tag_label || "None"}</b>
-            </div>
-          </div>
-
-          <TaskAIPanel taskId={id} />
-
-          <TaskAgentPanel
-            taskId={id}
-            onTaskDeleted={() => window.history.back()}
-          />
-        </aside>
       </div>
 
       <ConfirmDialog

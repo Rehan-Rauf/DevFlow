@@ -400,9 +400,11 @@ export default function TasksPage() {
     socket.on("task_changed", () => {
       loadTasks();
     });
+    window.addEventListener("devflow:task-created", loadTasks);
 
     return () => {
       socket.disconnect();
+      window.removeEventListener("devflow:task-created", loadTasks);
     };
   }, []);
 
@@ -1073,6 +1075,15 @@ export default function TasksPage() {
         </div>
 
         <div className="tasks-header-actions">
+          <button
+            type="button"
+            className="tasks-agent-action"
+            onClick={() => window.dispatchEvent(new CustomEvent("devflow:open-task-agent"))}
+            title="Choose a task for the Task Agent"
+          >
+            <span aria-hidden="true">✦</span>
+            Task Agent
+          </button>
           <button
             type="button"
             className="create-ai-button"

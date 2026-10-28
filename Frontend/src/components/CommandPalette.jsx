@@ -5,7 +5,7 @@ import "../styles/command-palette.css";
 
 // Static navigation commands, always available.
 const STATIC_COMMANDS = [
-  { id: "open-ai", label: "Open AI Assistant", hint: "AI", path: null, action: "ai" },
+  { id: "open-ai", label: "Open AI Agent", hint: "AI", path: null, action: "ai" },
   { id: "nav-dashboard", label: "Go to Dashboard", hint: "Navigation", path: "/dashboard" },
   { id: "nav-organizations", label: "Go to Organizations", hint: "Navigation", path: "/organizations" },
   { id: "nav-projects", label: "Go to Projects", hint: "Navigation", path: "/projects" },
@@ -40,6 +40,12 @@ export default function CommandPalette({ onOpenAI }) {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  useEffect(() => {
+    const openPalette = () => setOpen(true);
+    window.addEventListener("devflow:open-command-palette", openPalette);
+    return () => window.removeEventListener("devflow:open-command-palette", openPalette);
   }, []);
 
   // Load searchable data lazily, once, the first time the palette opens.

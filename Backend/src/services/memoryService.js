@@ -5,11 +5,16 @@ const { assertTaskAccess } = require("./retrievalService");
 const MEMORY_TYPES = ["preference", "decision", "requirement", "constraint", "context", "plan", "fact"];
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openrouter/free";
+const SENSITIVE_MEMORY_PATTERN = /(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:password|passphrase|api[\s_-]*key|access[\s_-]*token|refresh[\s_-]*token|secret|bearer)\b\s*(?:is|=|:)\s*\S+|\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}\b)/i;
 
 function memoryError(message, status = 400) {
   const error = new Error(message);
   error.status = status;
   return error;
+}
+
+function containsSensitiveMemory(content) {
+  return SENSITIVE_MEMORY_PATTERN.test(String(content || ""));
 }
 
 async function resolveScope(userId, scope = {}) {
@@ -19,16 +24,24 @@ async function resolveScope(userId, scope = {}) {
 
   if (taskId !== null) {
     const authorized = await assertTaskAccess(userId, taskId);
-    if (projectId !== null && projectId !== authorized.projectId) throw memoryError("Task does not belong to this project.", 403);
-    if (organizationId !== null && organizationId !== authorized.organizationId) throw memoryError("Task does not belong to this organization.", 403);
+    if (projectId !== null && String(projectId) !== String(authorized.projectId)) throw memoryError("Task does not belong to this project.", 403);
+    if (organizationId !== null && String(organizationId) !== String(authorized.organizationId)) throw memoryError("Task does not belong to this organization.", 403);
     return authorized;
   }
 
   if (projectId !== null) {
     const result = await pool.query(
       `SELECT p.id AS "projectId", p.organization_id AS "organizationId"
-       FROM projects p JOIN organization_members om ON om.organization_id = p.organization_id
-       WHERE p.id = $1 AND om.user_id = $2`,
+       FROM projects p
+       JOIN organization_members om ON om.organization_id = p.organization_id
+       WHERE p.id = $1 AND om.user_id = $2
+         AND (
+           om.role = 'owner'
+           OR EXISTS (
+             SELECT 1 FROM project_members pm
+             WHERE pm.project_id = p.id AND pm.user_id = $2
+           )
+         )`,
       [projectId, userId],
     );
     if (!result.rowCount) throw memoryError("You do not have access to this project.", 403);
@@ -78,9 +91,72 @@ function rowToMemory(row) {
   };
 }
 
+const MEMORY_VISIBILITY_FILTER = `(
+  (
+    m.organization_id IS NULL AND m.project_id IS NULL AND m.task_id IS NULL
+    AND m.user_id = $1
+  )
+  OR (
+    m.organization_id IS NOT NULL
+    AND EXISTS (
+      SELECT 1 FROM organization_members om
+      WHERE om.organization_id = m.organization_id AND om.user_id = $1
+    )
+    AND (
+      (m.project_id IS NULL AND m.task_id IS NULL)
+      OR (
+        m.project_id IS NOT NULL AND m.task_id IS NULL
+        AND (
+          EXISTS (
+            SELECT 1 FROM organization_members owner
+            WHERE owner.organization_id = m.organization_id
+              AND owner.user_id = $1 AND owner.role = 'owner'
+          )
+          OR EXISTS (
+            SELECT 1 FROM project_members pm
+            WHERE pm.project_id = m.project_id AND pm.user_id = $1
+          )
+        )
+      )
+      OR (
+        m.task_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM tasks t
+          JOIN projects p ON p.id = t.project_id
+          WHERE t.id = m.task_id
+            AND p.organization_id = m.organization_id
+            AND (
+              EXISTS (
+                SELECT 1 FROM organization_members owner
+                WHERE owner.organization_id = p.organization_id
+                  AND owner.user_id = $1 AND owner.role = 'owner'
+              )
+              OR EXISTS (
+                SELECT 1 FROM project_members pm
+                WHERE pm.project_id = p.id AND pm.user_id = $1
+                  AND pm.role = 'project_admin'
+              )
+              OR (
+                t.assignee_id = $1
+                AND EXISTS (
+                  SELECT 1 FROM project_members pm
+                  WHERE pm.project_id = p.id AND pm.user_id = $1
+                )
+              )
+            )
+        )
+      )
+    )
+  )
+)`;
+
 async function createMemory({ userId, type, content, importance = 5, metadata = {}, ...scope }) {
   const cleanContent = String(content || "").trim();
   if (!cleanContent) throw memoryError("Memory content is required.");
+  if (containsSensitiveMemory(cleanContent)) {
+    throw memoryError("Credentials and secrets cannot be saved as AI memory.");
+  }
   normalizeType(type);
   const resolved = await resolveScope(userId, scope);
   const existing = await pool.query(
@@ -112,7 +188,7 @@ async function listMemories({ userId, type, taskId, projectId, organizationId })
   const filters = [];
   if (type) { normalizeType(type); params.push(type); filters.push(`m.type = $${params.length}`); }
   if (taskId != null) {
-    const resolved = await resolveScope(userId, { taskId });
+    const resolved = await resolveScope(userId, { taskId, projectId, organizationId });
     params.push(Number(taskId), Number(resolved.projectId), Number(resolved.organizationId));
     filters.push(`(
       m.task_id = $${params.length - 2}
@@ -120,29 +196,14 @@ async function listMemories({ userId, type, taskId, projectId, organizationId })
       OR (m.task_id IS NULL AND m.project_id IS NULL AND m.organization_id = $${params.length})
       OR (m.task_id IS NULL AND m.project_id IS NULL AND m.organization_id IS NULL)
     )`);
-    filters.push(`(
-      m.user_id = $1 OR EXISTS (
-        SELECT 1 FROM organization_members visible_member
-        WHERE visible_member.organization_id = m.organization_id
-          AND visible_member.user_id = $1
-      )
-    )`);
   } else {
+    if (projectId != null) await resolveScope(userId, { projectId, organizationId });
+    else if (organizationId != null) await resolveScope(userId, { organizationId });
     for (const [column, value] of [["project_id", projectId], ["organization_id", organizationId]]) {
       if (value != null) { params.push(Number(value)); filters.push(`m.${column} = $${params.length}`); }
     }
-    if (projectId != null || organizationId != null) {
-      filters.push(`(
-        m.user_id = $1 OR EXISTS (
-          SELECT 1 FROM organization_members visible_member
-          WHERE visible_member.organization_id = m.organization_id
-            AND visible_member.user_id = $1
-        )
-      )`);
-    } else {
-      filters.push("m.user_id = $1");
-    }
   }
+  filters.push(MEMORY_VISIBILITY_FILTER);
   const result = await pool.query(`SELECT m.* FROM ai_memories m WHERE ${filters.join(" AND ")} ORDER BY m.updated_at DESC LIMIT 200`, params);
   return result.rows.map(rowToMemory);
 }
@@ -171,6 +232,14 @@ async function deleteMemory({ userId, memoryId }) {
   return { id: result.rows[0].id };
 }
 
+async function clearMemories({ userId }) {
+  const result = await pool.query(
+    "DELETE FROM ai_memories WHERE user_id = $1 RETURNING id",
+    [userId],
+  );
+  return { deletedCount: result.rowCount };
+}
+
 async function forgetMemory({ userId, request, taskId, projectId, organizationId }) {
   const phrase = String(request || "").trim().replace(/^forget(?: memory)?(?: that)?\s+/i, "").trim();
   if (!phrase) throw memoryError("Tell me which memory to forget.");
@@ -188,13 +257,7 @@ async function searchMemories({ userId, query, taskId, projectId, organizationId
   const cleanQuery = String(query || "").trim();
   if (!cleanQuery) return [];
   const params = [userId];
-  const scope = [`(
-    (m.user_id = $1 AND m.organization_id IS NULL AND m.project_id IS NULL AND m.task_id IS NULL)
-    OR (m.organization_id IS NOT NULL AND EXISTS (
-      SELECT 1 FROM organization_members accessible_member
-      WHERE accessible_member.organization_id = m.organization_id AND accessible_member.user_id = $1
-    ))
-  )`];
+  const scope = [MEMORY_VISIBILITY_FILTER];
   if (taskId != null) { params.push(Number(taskId)); scope.push(`(m.task_id = $${params.length} OR (m.task_id IS NULL AND (m.project_id IS NULL OR m.project_id = (SELECT project_id FROM tasks WHERE id = $${params.length}))))`); }
   else if (projectId != null) { params.push(Number(projectId)); scope.push(`(m.task_id IS NULL AND (m.project_id IS NULL OR m.project_id = $${params.length}))`); }
   else if (organizationId != null) { params.push(Number(organizationId)); scope.push(`m.task_id IS NULL AND m.project_id IS NULL AND (m.organization_id IS NULL OR m.organization_id = $${params.length})`); }
@@ -263,10 +326,15 @@ async function extractMemoriesFromConversation({ userId, message, taskId, projec
   const match = String(message || "").trim().match(/^(?:remember(?: that)?|don't forget(?: that)?)\s+(.+)/i);
   let candidates;
   if (match) {
+    if (containsSensitiveMemory(match[1])) {
+      throw memoryError("Credentials and secrets cannot be saved as AI memory.");
+    }
+    const content = match[1].trim();
     candidates = [{
-      type: /\b(requirement|required|must)\b/i.test(match[1]) ? "requirement"
-        : /\b(decid|use|migrat)\b/i.test(match[1]) ? "decision" : "context",
-      content: match[1].trim(),
+      type: /\b(prefer|preference|like)\b/i.test(content) ? "preference"
+        : /\b(requirement|required|must)\b/i.test(content) ? "requirement"
+          : /\b(decid|use|migrat)\b/i.test(content) ? "decision" : "context",
+      content,
       importance: 1,
     }];
   } else {
@@ -279,6 +347,7 @@ async function extractMemoriesFromConversation({ userId, message, taskId, projec
   }
   const saved = [];
   for (const candidate of candidates) {
+    if (containsSensitiveMemory(candidate.content)) continue;
     const created = await createMemory({
       userId,
       type: candidate.type,
@@ -307,6 +376,7 @@ module.exports = {
   createMemory,
   updateMemory,
   deleteMemory,
+  clearMemories,
   forgetMemory,
   getMemory,
   listMemories,
@@ -315,4 +385,5 @@ module.exports = {
   extractMemoriesFromConversation,
   isExplicitMemoryCommand,
   isForgetMemoryCommand,
+  containsSensitiveMemory,
 };

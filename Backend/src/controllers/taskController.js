@@ -11,6 +11,8 @@ const {
 } = require("../utils/response");
 
 const knowledgeBaseService = require("../services/knowledgeBaseService");
+const { deleteTask: deleteTaskWithAuthorization } = require("../services/retrievalService");
+const { isPositiveIntegerId } = require("../utils/validation");
 
 // Re-indexing must never block or break the actual request -
 // it just keeps the RAG knowledge base in sync in the background.
@@ -47,6 +49,20 @@ const priorities = [
   "urgent"
 ];
 
+function normalizeDueDate(value) {
+  if (value == null || value === "") return { valid: true, value: null };
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    value = value.toISOString().slice(0, 10);
+  }
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return { valid: false, value: null };
+  }
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value
+    ? { valid: false, value: null }
+    : { valid: true, value };
+}
+
 // A task keeps its readable status key for compatibility with existing data,
 // while the project-owned status record is the source of truth for validity,
 // colour, label, and safe deletion checks.
@@ -65,6 +81,14 @@ async function getProjectRoleTag(projectId, roleTagId) {
     [projectId, roleTagId],
   );
   return result.rows[0] || null;
+}
+
+async function recordTaskActivity(client, taskId, userId, action, oldValue = null, newValue = null) {
+  await client.query(
+    `INSERT INTO task_activity (task_id, user_id, action, old_value, new_value)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [taskId, userId, action, oldValue, newValue],
+  );
 }
 
 
@@ -105,6 +129,13 @@ async function projectAccess(userId, projectId) {
         FROM organization_members om
         WHERE om.organization_id = p.organization_id
           AND om.user_id = $1
+      ) AS is_org_member,
+
+      EXISTS (
+        SELECT 1
+        FROM organization_members om
+        WHERE om.organization_id = p.organization_id
+          AND om.user_id = $1
           AND om.role = 'owner'
       ) AS is_org_owner,
 
@@ -121,6 +152,11 @@ async function projectAccess(userId, projectId) {
         FROM project_members pm
         WHERE pm.project_id = p.id
           AND pm.user_id = $1
+          AND EXISTS (
+            SELECT 1 FROM organization_members om
+            WHERE om.organization_id = p.organization_id
+              AND om.user_id = pm.user_id
+          )
       ) AS is_project_member,
 
       EXISTS (
@@ -129,6 +165,11 @@ async function projectAccess(userId, projectId) {
         WHERE pm.project_id = p.id
           AND pm.user_id = $1
           AND pm.role = 'project_admin'
+          AND EXISTS (
+            SELECT 1 FROM organization_members om
+            WHERE om.organization_id = p.organization_id
+              AND om.user_id = pm.user_id
+          )
       ) AS is_project_admin
 
     FROM projects p
@@ -164,6 +205,10 @@ async function listTasks(req, res) {
 
     if (projectId) {
 
+      if (!isPositiveIntegerId(projectId)) {
+        return fail(res, 400, "Invalid project ID.");
+      }
+
       const access =
         await projectAccess(
           req.user.id,
@@ -179,7 +224,7 @@ async function listTasks(req, res) {
         );
       }
 
-      if (!access.is_org_owner && !access.is_project_member) {
+      if (!access.is_org_member || (!access.is_org_owner && !access.is_project_member)) {
 
         return fail(
           res,
@@ -318,7 +363,13 @@ async function listTasks(req, res) {
         INNER JOIN organizations o
           ON o.id = p.organization_id
 
-        WHERE (
+        WHERE EXISTS (
+          SELECT 1
+          FROM organization_members active_member
+          WHERE active_member.organization_id = p.organization_id
+            AND active_member.user_id = $1
+        )
+        AND (
           EXISTS (
             SELECT 1
             FROM organization_members om
@@ -424,7 +475,7 @@ async function analyzeTask(req, res) {
     // BASIC VALIDATION
     // ========================================================
 
-    if (!organizationId) {
+    if (!isPositiveIntegerId(organizationId)) {
 
       return fail(
         res,
@@ -434,15 +485,14 @@ async function analyzeTask(req, res) {
     }
 
 
-    if (!projectId) {
+    if (!isPositiveIntegerId(projectId)) {
 
       return fail(
         res,
         400,
-        "Project is required."
+        "A valid project ID is required."
       );
     }
-
 
     if (
       !message ||
@@ -1028,7 +1078,7 @@ related to the selected project.
 // ============================================================
 
 async function createTask(req, res) {
-
+  let client;
   try {
 
     const {
@@ -1047,13 +1097,26 @@ async function createTask(req, res) {
     // PROJECT
     // ========================================================
 
-    if (!projectId) {
+    if (!isPositiveIntegerId(projectId)) {
 
       return fail(
         res,
         400,
-        "Project is required."
+        "A valid project ID is required."
       );
+    }
+
+    if (typeof title !== "string" || !title.trim() || title.trim().length > 240) {
+      return fail(res, 400, "Task title is required and must be 240 characters or fewer.");
+    }
+    if (typeof description !== "string") {
+      return fail(res, 400, "Task description must be text.");
+    }
+    if (assigneeId !== null && !isPositiveIntegerId(assigneeId)) {
+      return fail(res, 400, "Invalid assignee ID.");
+    }
+    if (roleTagId !== null && !isPositiveIntegerId(roleTagId)) {
+      return fail(res, 400, "Invalid role tag ID.");
     }
 
 
@@ -1106,19 +1169,6 @@ async function createTask(req, res) {
     // TITLE
     // ========================================================
 
-    if (
-      !title ||
-      !String(title).trim()
-    ) {
-
-      return fail(
-        res,
-        400,
-        "Task title is required."
-      );
-    }
-
-
     // ========================================================
     // STATUS
     // ========================================================
@@ -1166,10 +1216,14 @@ async function createTask(req, res) {
           `
           SELECT 1
 
-          FROM project_members
+          FROM project_members pm
+          JOIN projects p ON p.id = pm.project_id
+          JOIN organization_members om
+            ON om.organization_id = p.organization_id
+           AND om.user_id = pm.user_id
 
-          WHERE project_id = $1
-            AND user_id = $2
+          WHERE pm.project_id = $1
+            AND pm.user_id = $2
           `,
           [
             projectId,
@@ -1193,19 +1247,21 @@ async function createTask(req, res) {
     // DUE DATE
     // ========================================================
 
-    const normalizedDueDate =
-      dueDate &&
-      String(dueDate).trim()
-        ? String(dueDate).trim()
-        : null;
+    const normalizedDate = normalizeDueDate(dueDate);
+    if (!normalizedDate.valid) {
+      return fail(res, 400, "Due date must be a valid YYYY-MM-DD date.");
+    }
+    const normalizedDueDate = normalizedDate.value;
 
 
     // ========================================================
     // INSERT
     // ========================================================
 
+    client = await pool.connect();
+    await client.query("BEGIN");
     const result =
-      await pool.query(
+      await client.query(
         `
         INSERT INTO tasks
         (
@@ -1255,22 +1311,21 @@ async function createTask(req, res) {
     const createdTask =
       result.rows[0];
 
+    await recordTaskActivity(
+      client,
+      createdTask.id,
+      req.user.id,
+      "created",
+      null,
+      createdTask.title,
+    );
+    await client.query("COMMIT");
 
     // ========================================================
     // SOCKET
     // ========================================================
 
-    const io =
-      req.app.get("io");
-
-
-    if (io) {
-
-      io.emit(
-        "task_changed",
-        createdTask
-      );
-    }
+    await req.app.get("emitTaskChanged")(createdTask.id);
 
 
     // ========================================================
@@ -1310,20 +1365,13 @@ async function createTask(req, res) {
 
         if (io) {
 
-          io.emit(
+          io.to(`user:${assigneeId}`).emit(
             "notification",
             {
-              title:
-                "Task assigned",
-
-              message:
-                `You were assigned: ${String(title).trim()}`,
-
-              type:
-                "task_assigned",
-
-              userId:
-                assigneeId
+              userId: assigneeId,
+              title: "Task assigned",
+              message: `You were assigned: ${String(title).trim()}`,
+              type: "task_assigned",
             }
           );
         }
@@ -1349,6 +1397,9 @@ async function createTask(req, res) {
 
   } catch (error) {
 
+    if (client) {
+      await client.query("ROLLBACK").catch(() => {});
+    }
     console.error(
       "Create task error:",
       error
@@ -1359,6 +1410,8 @@ async function createTask(req, res) {
       500,
       "Unable to create task."
     );
+  } finally {
+    client?.release();
   }
 }
 
@@ -1444,7 +1497,7 @@ async function getTask(req, res) {
 
     if (
       !access ||
-      (!access.is_org_owner && !access.is_project_member)
+      (!access.is_org_member || (!access.is_org_owner && !access.is_project_member))
     ) {
 
       return fail(
@@ -1454,7 +1507,11 @@ async function getTask(req, res) {
       );
     }
 
-    if (!access.is_org_owner && !access.is_project_admin && task.assignee_id !== req.user.id) {
+    if (
+      !access.is_org_owner &&
+      !access.is_project_admin &&
+      Number(task.assignee_id) !== Number(req.user.id)
+    ) {
       return fail(
         res,
         403,
@@ -1489,7 +1546,7 @@ async function getTask(req, res) {
 // ============================================================
 
 async function updateTask(req, res) {
-
+  let client;
   try {
 
     const {
@@ -1531,6 +1588,7 @@ async function updateTask(req, res) {
 
     if (
       !access ||
+      !access.is_org_member ||
       (!access.is_org_owner && !access.is_project_admin)
     ) {
 
@@ -1565,19 +1623,18 @@ async function updateTask(req, res) {
         task.due_date
     } = req.body;
 
-
-    if (
-      !title ||
-      !String(title).trim()
-    ) {
-
-      return fail(
-        res,
-        400,
-        "Task title is required."
-      );
+    if (typeof title !== "string" || !title.trim() || title.trim().length > 240) {
+      return fail(res, 400, "Task title is required and must be 240 characters or fewer.");
     }
-
+    if (typeof description !== "string") {
+      return fail(res, 400, "Task description must be text.");
+    }
+    if (assigneeId !== null && !isPositiveIntegerId(assigneeId)) {
+      return fail(res, 400, "Invalid assignee ID.");
+    }
+    if (roleTagId !== null && !isPositiveIntegerId(roleTagId)) {
+      return fail(res, 400, "Invalid role tag ID.");
+    }
 
     const projectStatus = await getProjectStatus(task.project_id, status);
 
@@ -1614,10 +1671,14 @@ async function updateTask(req, res) {
           `
           SELECT 1
 
-          FROM project_members
+          FROM project_members pm
+          JOIN projects p ON p.id = pm.project_id
+          JOIN organization_members om
+            ON om.organization_id = p.organization_id
+           AND om.user_id = pm.user_id
 
-          WHERE project_id = $1
-            AND user_id = $2
+          WHERE pm.project_id = $1
+            AND pm.user_id = $2
           `,
           [
             task.project_id,
@@ -1637,15 +1698,17 @@ async function updateTask(req, res) {
     }
 
 
-    const normalizedDueDate =
-      dueDate &&
-      String(dueDate).trim()
-        ? String(dueDate).trim()
-        : null;
+    const normalizedDate = normalizeDueDate(dueDate);
+    if (!normalizedDate.valid) {
+      return fail(res, 400, "Due date must be a valid YYYY-MM-DD date.");
+    }
+    const normalizedDueDate = normalizedDate.value;
 
 
+    client = await pool.connect();
+    await client.query("BEGIN");
     const result =
-      await pool.query(
+      await client.query(
         `
         UPDATE tasks
 
@@ -1681,18 +1744,31 @@ async function updateTask(req, res) {
     const updatedTask =
       result.rows[0];
 
-
-    const io =
-      req.app.get("io");
-
-
-    if (io) {
-
-      io.emit(
-        "task_changed",
-        updatedTask
-      );
+    const activityFields = [
+      ["title", task.title, String(title).trim()],
+      ["status", task.status, status],
+      ["priority", task.priority, priority],
+      ["assignee", task.assignee_id, assigneeId],
+      ["due_date", task.due_date, normalizedDueDate],
+      ["role_tag", task.role_tag_id, roleTagId || null],
+    ];
+    for (const [field, oldValue, newValue] of activityFields) {
+      const oldText = oldValue == null ? null : String(oldValue);
+      const newText = newValue == null ? null : String(newValue);
+      if (oldText !== newText) {
+        await recordTaskActivity(
+          client,
+          updatedTask.id,
+          req.user.id,
+          `${field}_changed`,
+          oldText,
+          newText,
+        );
+      }
     }
+    await client.query("COMMIT");
+
+    await req.app.get("emitTaskChanged")(updatedTask.id);
 
     reindexTaskInBackground(updatedTask.id);
 
@@ -1705,6 +1781,9 @@ async function updateTask(req, res) {
 
   } catch (error) {
 
+    if (client) {
+      await client.query("ROLLBACK").catch(() => {});
+    }
     console.error(
       "Update task error:",
       error
@@ -1715,6 +1794,8 @@ async function updateTask(req, res) {
       500,
       "Unable to update task."
     );
+  } finally {
+    client?.release();
   }
 }
 
@@ -1762,6 +1843,7 @@ async function deleteTask(req, res) {
 
     if (
       !access ||
+      !access.is_org_member ||
       (!access.is_org_owner && !access.is_project_admin)
     ) {
 
@@ -1772,36 +1854,20 @@ async function deleteTask(req, res) {
       );
     }
 
-
-    await pool.query(
-      `
-      DELETE FROM tasks
-      WHERE id = $1
-      `,
-      [id]
-    );
+    const deletion = await deleteTaskWithAuthorization({
+      taskId: id,
+      projectId: existing.rows[0].project_id,
+      userId: req.user.id,
+    });
 
     knowledgeBaseService
       .deleteSource("task", Number(id))
       .catch((error) => console.error(`Knowledge cleanup failed for task ${id}:`, error.message));
 
-    const io =
-      req.app.get("io");
-
-
-    if (io) {
-
-      io.emit(
-        "task_changed",
-        {
-          id:
-            Number(id),
-
-          deleted:
-            true
-        }
-      );
-    }
+    await req.app.get("emitTaskChanged")(
+      id,
+      { deleted: true, audienceUserIds: deletion.audienceUserIds },
+    );
 
 
     return ok(
@@ -1817,6 +1883,10 @@ async function deleteTask(req, res) {
       "Delete task error:",
       error
     );
+
+    if (error.status === 403 || error.status === 404) {
+      return fail(res, error.status, error.message);
+    }
 
     return fail(
       res,

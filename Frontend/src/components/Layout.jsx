@@ -6,6 +6,8 @@ import { useTheme } from "../context/ThemeContext";
 import SelectField from "./ui/SelectField";
 import CommandPalette from "./CommandPalette";
 import GlobalAIChat from "./GlobalAIChat";
+import QuickTaskModal from "./QuickTaskModal";
+import TaskAgentDialog from "./TaskAgentDialog";
 import "../styles/layout.css";
 
 // Adding a new top-level area now only requires one entry here.
@@ -15,7 +17,6 @@ const NAVIGATION = [
   { to: "/projects", label: "Projects", icon: "◫" },
   { to: "/tasks", label: "Tasks", icon: "✓" },
   { to: "/knowledge", label: "Knowledge base", icon: "⌕" },
-  { to: "/profile", label: "Profile", icon: "◌" },
 ];
 
 function getPageTitle(pathname) {
@@ -26,12 +27,6 @@ function getPageTitle(pathname) {
   if (pathname.startsWith("/knowledge")) return "Knowledge";
   if (pathname.startsWith("/profile")) return "Profile";
   return "Workspace";
-}
-
-function isDetailPath(pathname) {
-  return ["organizations", "projects", "tasks"].some((segment) => (
-    new RegExp(`^/${segment}/[^/]+$`).test(pathname)
-  ));
 }
 
 function getAIContext(pathname) {
@@ -48,13 +43,50 @@ export default function Layout() {
   const navigate = useNavigate();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isAiOpen, setIsAiOpen] = useState(false);
+  const [isTaskAgentOpen, setIsTaskAgentOpen] = useState(false);
+  const [taskAgentScope, setTaskAgentScope] = useState(null);
+  const [isQuickTaskOpen, setIsQuickTaskOpen] = useState(false);
   const [toasts, setToasts] = useState([]);
 
   const pageTitle = getPageTitle(location.pathname);
-  const showWorkspaceBreadcrumb = location.pathname !== "/overview"
-    && !isDetailPath(location.pathname)
-    && NAVIGATION.some((item) => item.to === location.pathname);
   const aiContext = getAIContext(location.pathname);
+
+  function openGlobalAI() {
+    setIsTaskAgentOpen(false);
+    setIsQuickTaskOpen(false);
+    setIsAiOpen(true);
+  }
+
+  function openTaskAgent(scope = aiContext) {
+    setIsAiOpen(false);
+    setIsQuickTaskOpen(false);
+    setTaskAgentScope(scope);
+    setIsTaskAgentOpen(true);
+  }
+
+  function openQuickTask() {
+    setIsAiOpen(false);
+    setIsTaskAgentOpen(false);
+    setIsQuickTaskOpen(true);
+  }
+
+  function openSearch() {
+    window.dispatchEvent(new Event("devflow:open-command-palette"));
+  }
+
+  function handleAgentTaskDeleted() {
+    setIsTaskAgentOpen(false);
+    navigate("/tasks");
+  }
+
+  useEffect(() => {
+    const openTaskAgentFromPage = (event) => {
+      openTaskAgent(event.detail || aiContext);
+    };
+
+    window.addEventListener("devflow:open-task-agent", openTaskAgentFromPage);
+    return () => window.removeEventListener("devflow:open-task-agent", openTaskAgentFromPage);
+  }, [location.pathname]);
 
   useEffect(() => {
     // Tablet/desktop par menu dobara band ho jata hai taake layout stable rahe.
@@ -105,7 +137,7 @@ export default function Layout() {
   }, [user?.id]);
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${isAiOpen ? " app-shell--ai-open" : ""}`}>
       {isMobileMenuOpen && (
         <button className="mobile-scrim" onClick={() => setIsMobileMenuOpen(false)} aria-label="Close navigation menu" />
       )}
@@ -121,28 +153,21 @@ export default function Layout() {
         <div className="workspace-pill"><span className="dot" />Team workspace</div>
 
         <nav className="nav" aria-label="Workspace navigation">
+          <p className="nav-section-label">Workspace</p>
           {NAVIGATION.map((item) => (
             <NavLink key={item.to} to={item.to} onClick={() => setIsMobileMenuOpen(false)}>
               <span aria-hidden="true">{item.icon}</span>
               <span>{item.label}</span>
             </NavLink>
           ))}
-          <button
-            type="button"
-            className="nav-ai-action"
-            onClick={() => { setIsAiOpen(true); setIsMobileMenuOpen(false); }}
-            aria-label="Open AI Assistant"
-          >
-            <span aria-hidden="true">✦</span>
-            <span>AI Assistant</span>
-          </button>
         </nav>
 
         <div className="sidebar-footer">
-          <div className="user-mini">
+          <NavLink className="sidebar-profile-link" to="/profile" onClick={() => setIsMobileMenuOpen(false)}>
             <div className="avatar">{user?.name?.[0]?.toUpperCase() || "U"}</div>
-            <div><strong>{user?.name || "User"}</strong><span>{user?.email || ""}</span></div>
-          </div>
+            <div><strong>{user?.name || "User"}</strong><span>Profile and account</span></div>
+            <span className="sidebar-profile-chevron" aria-hidden="true">›</span>
+          </NavLink>
           <label className="theme-select">
             <span>Theme</span>
             <SelectField
@@ -160,7 +185,7 @@ export default function Layout() {
         </div>
       </aside>
 
-      <main className={`main-content ${isAiOpen ? "main-content--ai-open" : ""}`}>
+      <main className="main-content">
         <header className="topbar">
           <button
             className="menu-btn"
@@ -171,26 +196,49 @@ export default function Layout() {
             ☰
           </button>
           <div className="topbar-title">{pageTitle}</div>
-          <div className="cmdk-hint" title="Press Ctrl+K or Cmd+K"><span>⌘</span>K</div>
-          <div className="topbar-user">{user?.name}</div>
-        </header>
-
-        {showWorkspaceBreadcrumb && (
-          <div className="workspace-breadcrumb">
-            <NavLink to="/overview" className="breadcrumb-back"><span className="breadcrumb-arrow">←</span><span>Overview</span></NavLink>
-            <span className="breadcrumb-divider">/</span>
-            <span className="breadcrumb-current">{pageTitle}</span>
+          <div className="topbar-actions">
+            <button
+              type="button"
+              className="topbar-search"
+              onClick={openSearch}
+              aria-label="Search workspace"
+              title="Search workspace (Ctrl+K)"
+            >
+              <span aria-hidden="true">⌕</span>
+              <span>Search</span>
+              <kbd>Ctrl K</kbd>
+            </button>
+            <button
+              type="button"
+              className={`topbar-create-task${isQuickTaskOpen ? " is-active" : ""}`}
+              onClick={openQuickTask}
+              aria-label="Create Task"
+              title="Create Task"
+            >
+              <span aria-hidden="true">+</span>
+              <span>Create Task</span>
+            </button>
+            <button
+              type="button"
+              className={`topbar-ai-agent${isAiOpen ? " is-active" : ""}`}
+              onClick={openGlobalAI}
+              aria-label="Open AI Agent"
+              aria-pressed={isAiOpen}
+              title="Open AI Agent"
+            >
+              <span aria-hidden="true">✦</span>
+              <span>AI Agent</span>
+            </button>
+            <NavLink className="topbar-user" to="/profile" aria-label={`Open profile for ${user?.name || "user"}`}>
+              <span className="avatar">{user?.name?.[0]?.toUpperCase() || "U"}</span>
+            </NavLink>
           </div>
-        )}
+        </header>
 
         <Outlet />
       </main>
 
-      <CommandPalette onOpenAI={() => setIsAiOpen(true)} />
-
-      {!isAiOpen && (
-        <button type="button" className="gai-launcher" onClick={() => setIsAiOpen(true)} aria-label="Open AI Assistant" title="AI Assistant">✦</button>
-      )}
+      <CommandPalette onOpenAI={openGlobalAI} />
 
       <GlobalAIChat
         open={isAiOpen}
@@ -198,6 +246,29 @@ export default function Layout() {
         context={aiContext}
         onClose={() => setIsAiOpen(false)}
         onMinimize={() => setIsAiOpen(false)}
+      />
+      <TaskAgentDialog
+        open={isTaskAgentOpen}
+        scope={taskAgentScope}
+        onClose={() => setIsTaskAgentOpen(false)}
+        onTaskDeleted={handleAgentTaskDeleted}
+      />
+      <QuickTaskModal
+        isOpen={isQuickTaskOpen}
+        context={aiContext}
+        onClose={() => setIsQuickTaskOpen(false)}
+        onSuccess={(task) => {
+          setIsQuickTaskOpen(false);
+          const id = `${Date.now()}-${Math.random()}`;
+          setToasts((current) => [...current, {
+            id,
+            title: "Task created",
+            message: `"${task.title}" was added to the selected project.`,
+          }]);
+          window.setTimeout(() => {
+            setToasts((current) => current.filter((toast) => toast.id !== id));
+          }, 4500);
+        }}
       />
 
       <div className="toast-stack" aria-live="polite">

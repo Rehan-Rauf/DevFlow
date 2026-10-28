@@ -63,21 +63,26 @@ export default function ResetPassword() {
         <p className="muted">Choose a strong password for your account.</p>
         {error && <div className="error-box" role="alert">{error}</div>}
         {message && <div className="success-box" role="status">{message}</div>}
-        <label>
-          Password
-          <span className="password-input-wrap">
-            <input required type={showPassword ? "text" : "password"} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} />
-            <button
-              className="password-toggle"
-              type="button"
-              onClick={() => setShowPassword((visible) => !visible)}
-              aria-label={showPassword ? "Hide password" : "Show password"}
-              aria-pressed={showPassword}
-            >
-              <PasswordVisibilityIcon visible={showPassword} />
-            </button>
-          </span>
-        </label>
+        <label htmlFor="reset-password">Password</label>
+        <span className="password-input-wrap">
+          <input
+            id="reset-password"
+            required
+            type={showPassword ? "text" : "password"}
+            autoComplete="new-password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+          />
+          <button
+            className="password-toggle"
+            type="button"
+            onClick={() => setShowPassword((visible) => !visible)}
+            aria-label={showPassword ? "Hide password" : "Show password"}
+            aria-pressed={showPassword}
+          >
+            <PasswordVisibilityIcon visible={showPassword} />
+          </button>
+        </span>
         <ul className="password-requirements" aria-label="Password requirements">
           {requirements.map(([label, test]) => <li className={test(password) ? "is-met" : ""} key={label}>{test(password) ? "✓" : "○"} {label}</li>)}
         </ul>

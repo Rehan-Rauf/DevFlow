@@ -1,5 +1,7 @@
 const pool = require("../config/database");
 const aiService = require("../services/aiService");
+const globalActionService = require("../services/globalActionService");
+const crypto = require("node:crypto");
 const { assertTaskAccess } = require("../services/retrievalService");
 const { ok, fail } = require("../utils/response");
 const { extractMemoriesFromConversation, isExplicitMemoryCommand } = require("../services/memoryService");
@@ -122,14 +124,36 @@ async function taskChat(req, res) {
 
     const history = historyResult.rows.reverse();
 
-    const { answer, sources, intent, memoriesUsed } = await aiService.taskChat({
-      userId: req.user.id,
-      taskId: scope.taskId,
-      projectId: scope.projectId,
-      organizationId: scope.organizationId,
-      message: message.trim(),
-      history,
-    });
+    let result;
+    if (isExplicitMemoryCommand(message)) {
+      const memories = await extractMemoriesFromConversation({
+        userId: req.user.id,
+        message: message.trim(),
+        taskId: scope.taskId,
+        projectId: scope.projectId,
+        organizationId: scope.organizationId,
+      });
+      result = {
+        answer: `Saved ${memories.length} memory item${memories.length === 1 ? "" : "s"} for this task.`,
+        sources: memories.map((memory) => ({
+          type: "memory",
+          id: memory.id,
+          label: memory.content,
+        })),
+        intent: "MEMORY_SAVED",
+        memoriesUsed: 0,
+      };
+    } else {
+      result = await aiService.taskChat({
+        userId: req.user.id,
+        taskId: scope.taskId,
+        projectId: scope.projectId,
+        organizationId: scope.organizationId,
+        message: message.trim(),
+        history,
+      });
+    }
+    const { answer, sources, intent, memoriesUsed } = result;
 
     // Save user's message with session_id.
     await pool.query(
@@ -147,15 +171,7 @@ async function taskChat(req, res) {
       ]
     );
 
-    if (isExplicitMemoryCommand(message)) {
-      await extractMemoriesFromConversation({
-        userId: req.user.id,
-        message: message.trim(),
-        taskId: scope.taskId,
-        projectId: scope.projectId,
-        organizationId: scope.organizationId,
-      });
-    } else {
+    if (!isExplicitMemoryCommand(message)) {
       void extractMemoriesFromConversation({
         userId: req.user.id,
         message: message.trim(),
@@ -297,7 +313,7 @@ async function getTaskChatHistory(req, res) {
 
 async function globalChat(req, res) {
   try {
-    const { message, context = null } = req.body;
+    const { message, context = null, requestId = null } = req.body;
 
     if (!message || !String(message).trim()) {
       return fail(res, 400, "Message is required.");
@@ -323,13 +339,41 @@ async function globalChat(req, res) {
 
     const history = historyResult.rows.reverse();
 
-    const { answer, sources, memoriesUsed } = await aiService.globalChat({
-      userId: req.user.id,
-      message: message.trim(),
-      history,
-      context,
-    });
+    const requestKey = requestId || crypto.randomUUID();
+    if (typeof requestKey !== "string"
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestKey)) {
+      return fail(res, 400, "Invalid AI request ID.");
+    }
 
+    let result;
+    if (isExplicitMemoryCommand(message)) {
+      const memoryScope = await aiService.getPageMemoryScope(req.user.id, context);
+      const memories = await extractMemoriesFromConversation({
+        userId: req.user.id,
+        message: message.trim(),
+        ...memoryScope,
+      });
+      result = {
+        answer: `Saved ${memories.length} memory item${memories.length === 1 ? "" : "s"}.`,
+        sources: memories.map((memory) => ({
+          type: "memory",
+          id: memory.id,
+          label: memory.content,
+        })),
+        memoriesUsed: 0,
+        actionResults: [],
+      };
+    } else {
+      result = await aiService.globalChat({
+        userId: req.user.id,
+        message: message.trim(),
+        history,
+        context,
+        sessionId: session.id,
+        requestId: requestKey,
+      });
+    }
+    const { answer, sources, memoriesUsed, actionResults = [] } = result;
     // Save user's message.
     await pool.query(
       `
@@ -345,12 +389,7 @@ async function globalChat(req, res) {
       ]
     );
 
-    if (isExplicitMemoryCommand(message)) {
-      await extractMemoriesFromConversation({
-        userId: req.user.id,
-        message: message.trim(),
-      });
-    } else {
+    if (!isExplicitMemoryCommand(message)) {
       void extractMemoriesFromConversation({
         userId: req.user.id,
         message: message.trim(),
@@ -391,6 +430,9 @@ async function globalChat(req, res) {
       sources,
       memoriesUsed,
       sessionId: session.id,
+      requestId: requestKey,
+      actionResults,
+      actionProposals: result.actionProposals || [],
     });
   } catch (error) {
     console.error("GLOBAL AI CHAT ERROR:", error);
@@ -404,6 +446,56 @@ async function globalChat(req, res) {
         ? "The AI assistant is unavailable right now."
         : error.message
     );
+  }
+}
+
+async function getGlobalActionProposals(req, res) {
+  try {
+    const sessionId = req.query.sessionId === undefined ? null : Number(req.query.sessionId);
+    if (sessionId !== null && (!Number.isSafeInteger(sessionId) || sessionId < 1)) {
+      return fail(res, 400, "Invalid chat session ID.");
+    }
+    const proposals = await globalActionService.listProposals(req.user.id, sessionId);
+    return ok(res, { proposals });
+  } catch (error) {
+    console.error("GET GLOBAL AI ACTION PROPOSALS ERROR:", error);
+    return fail(res, 500, "Unable to load pending AI actions.");
+  }
+}
+
+async function approveGlobalActionProposal(req, res) {
+  try {
+    const { proposalId } = req.params;
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(proposalId)) {
+      return fail(res, 400, "Invalid action proposal ID.");
+    }
+    const outcome = await globalActionService.approveProposal(req.user.id, proposalId);
+    if (outcome.proposal.status === "succeeded"
+      && outcome.result?.resourceType === "task"
+      && outcome.result.resource?.id) {
+      await req.app.get("emitTaskChanged")(outcome.result.resource.id);
+    }
+    return ok(res, outcome);
+  } catch (error) {
+    if (error.status) return fail(res, error.status, error.message);
+    console.error("APPROVE GLOBAL AI ACTION ERROR:", error);
+    return fail(res, 500, "Unable to approve this AI action.");
+  }
+}
+
+async function cancelGlobalActionProposal(req, res) {
+  try {
+    const { proposalId } = req.params;
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(proposalId)) {
+      return fail(res, 400, "Invalid action proposal ID.");
+    }
+    return ok(res, {
+      proposal: await globalActionService.cancelProposal(req.user.id, proposalId),
+    });
+  } catch (error) {
+    if (error.status) return fail(res, error.status, error.message);
+    console.error("CANCEL GLOBAL AI ACTION ERROR:", error);
+    return fail(res, 500, "Unable to cancel this AI action.");
   }
 }
 
@@ -570,6 +662,34 @@ async function endGlobalChat(req, res) {
     );
   }
 }
+
+async function endAllChats(req, res) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      `UPDATE ai_chat_sessions
+       SET status = 'ENDED', ended_at = NOW()
+       WHERE user_id = $1 AND status = 'ACTIVE'
+       RETURNING id, chat_type`,
+      [req.user.id],
+    );
+    await client.query("COMMIT");
+    return ok(res, {
+      ended: result.rowCount,
+      sessions: result.rows,
+      historyPreserved: true,
+      memoriesPreserved: true,
+    });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error("END ALL AI CHATS ERROR:", error);
+    return fail(res, 500, "Unable to close all AI chats.");
+  } finally {
+    client.release();
+  }
+}
+
 // ======================================================
 // GET RECENT AI CHAT SESSIONS
 // ======================================================
@@ -631,7 +751,7 @@ async function getRecentChats(req, res) {
           END
         )
 
-      ORDER BY activity.last_message_at DESC, s.created_at DESC
+      ORDER BY last_message_at DESC NULLS LAST, s.created_at DESC
       LIMIT 20
       `,
       [req.user.id]
@@ -655,11 +775,36 @@ async function getRecentChats(req, res) {
 // GET ONE SAVED AI CHAT SESSION
 // ============================================================
 
+async function deleteChatSession(req, res) {
+  try {
+    const sessionId = Number(req.params.sessionId);
+    if (!Number.isSafeInteger(sessionId) || sessionId < 1) {
+      return fail(res, 400, "Invalid chat session ID.");
+    }
+    const result = await pool.query(
+      `DELETE FROM ai_chat_sessions
+       WHERE id = $1 AND user_id = $2
+       RETURNING id, chat_type`,
+      [sessionId, req.user.id],
+    );
+    if (!result.rowCount) return fail(res, 404, "Chat session not found.");
+    return ok(res, {
+      id: result.rows[0].id,
+      chatType: result.rows[0].chat_type,
+      conversationDeleted: true,
+      memoriesDeleted: false,
+    });
+  } catch (error) {
+    console.error("DELETE AI CHAT SESSION ERROR:", error);
+    return fail(res, 500, "Unable to delete the conversation.");
+  }
+}
+
 async function getChatSessionHistory(req, res) {
   try {
     const sessionId = Number(req.params.sessionId);
 
-    if (!Number.isInteger(sessionId)) {
+    if (!Number.isSafeInteger(sessionId) || sessionId < 1) {
       return fail(res, 400, "Invalid chat session ID.");
     }
 
@@ -761,6 +906,11 @@ module.exports = {
   getGlobalChatHistory,
   endTaskChat,
   endGlobalChat,
+  endAllChats,
   getRecentChats,
   getChatSessionHistory,
+  deleteChatSession,
+  getGlobalActionProposals,
+  approveGlobalActionProposal,
+  cancelGlobalActionProposal,
 };

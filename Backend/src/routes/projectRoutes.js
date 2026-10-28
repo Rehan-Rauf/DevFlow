@@ -24,6 +24,8 @@ const workflowRoutes = require("./workflowRoutes");
 const {
   requireAuth
 } = require("../middleware/authMiddleware");
+const { fail } = require("../utils/response");
+const { isPositiveIntegerId } = require("../utils/validation");
 
 
 // Create an Express Router.
@@ -47,6 +49,16 @@ const router = express.Router();
 // Invalid/missing token:
 //     requireAuth → 401 response → STOP
 router.use(requireAuth);
+
+router.param("id", (req, res, next, id) => {
+  if (!isPositiveIntegerId(id)) return fail(res, 400, "Invalid project ID.");
+  return next();
+});
+
+router.param("userId", (req, res, next, userId) => {
+  if (!isPositiveIntegerId(userId)) return fail(res, 400, "Invalid user ID.");
+  return next();
+});
 
 
 // ======================================================

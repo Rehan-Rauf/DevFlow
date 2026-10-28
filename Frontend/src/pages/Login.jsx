@@ -71,27 +71,26 @@ export default function Login() {
           />
         </label>
 
-        <label>
-          Password
-          <span className="password-input-wrap">
-            <input
-              required
-              type={showPassword ? "text" : "password"}
-              autoComplete="current-password"
-              value={form.password}
-              onChange={(event) => setForm({ ...form, password: event.target.value })}
-            />
-            <button
-              className="password-toggle"
-              type="button"
-              onClick={() => setShowPassword((visible) => !visible)}
-              aria-label={showPassword ? "Hide password" : "Show password"}
-              aria-pressed={showPassword}
-            >
-              <PasswordVisibilityIcon visible={showPassword} />
-            </button>
-          </span>
-        </label>
+        <label htmlFor="login-password">Password</label>
+        <span className="password-input-wrap">
+          <input
+            id="login-password"
+            required
+            type={showPassword ? "text" : "password"}
+            autoComplete="current-password"
+            value={form.password}
+            onChange={(event) => setForm({ ...form, password: event.target.value })}
+          />
+          <button
+            className="password-toggle"
+            type="button"
+            onClick={() => setShowPassword((visible) => !visible)}
+            aria-label={showPassword ? "Hide password" : "Show password"}
+            aria-pressed={showPassword}
+          >
+            <PasswordVisibilityIcon visible={showPassword} />
+          </button>
+        </span>
 
         <button className="primary-button wide" disabled={busy}>
           {busy ? "Signing in..." : "Sign in"}

@@ -35,6 +35,11 @@ async function assertTaskAccess(userId, taskId) {
         SELECT 1 FROM organization_members om
         WHERE om.organization_id = p.organization_id
           AND om.user_id = $1
+      ) AS is_org_member,
+      EXISTS (
+        SELECT 1 FROM organization_members om
+        WHERE om.organization_id = p.organization_id
+          AND om.user_id = $1
           AND om.role = 'owner'
       ) AS is_org_owner,
       EXISTS (
@@ -42,11 +47,21 @@ async function assertTaskAccess(userId, taskId) {
         WHERE pm.project_id = p.id
           AND pm.user_id = $1
           AND pm.role = 'project_admin'
+          AND EXISTS (
+            SELECT 1 FROM organization_members om
+            WHERE om.organization_id = p.organization_id
+              AND om.user_id = pm.user_id
+          )
       ) AS is_project_admin,
       EXISTS (
         SELECT 1 FROM project_members pm
         WHERE pm.project_id = p.id
           AND pm.user_id = $1
+          AND EXISTS (
+            SELECT 1 FROM organization_members om
+            WHERE om.organization_id = p.organization_id
+              AND om.user_id = pm.user_id
+          )
       ) AS is_project_member
     FROM tasks t
     JOIN projects p ON p.id = t.project_id
@@ -64,7 +79,11 @@ async function assertTaskAccess(userId, taskId) {
 
   const row = result.rows[0];
 
-  const canViewTask = row.is_org_owner || row.is_project_admin || (row.is_project_member && Number(row.assignee_id) === Number(userId));
+  const canViewTask = row.is_org_member && (
+    row.is_org_owner
+    || row.is_project_admin
+    || (row.is_project_member && Number(row.assignee_id) === Number(userId))
+  );
 
   if (!canViewTask) {
     const error = new Error("You do not have access to this task.");
@@ -190,16 +209,18 @@ async function getProjectFacts(projectId) {
 // and project, so long/older comments or related discussion can
 // still surface even if not in the last 15 fetched above.
 
-async function getTaskKnowledgeContext({ taskId, projectId, organizationId, query }) {
-  const facts = await getTaskFacts(taskId);
+async function getTaskKnowledgeContext({ userId, taskId, projectId, organizationId, query }) {
+  const authorizedScope = await assertTaskAccess(userId, taskId);
+  const facts = await getTaskFacts(authorizedScope.taskId);
 
   let semanticHits = [];
   try {
     semanticHits = await searchKnowledge({
       query,
-      organizationId,
-      projectId,
-      taskId,
+      userId,
+      organizationId: authorizedScope.organizationId,
+      projectId: authorizedScope.projectId,
+      taskId: authorizedScope.taskId,
       limit: 6,
     });
   } catch (error) {
@@ -213,7 +234,7 @@ async function getTaskKnowledgeContext({ taskId, projectId, organizationId, quer
 
 // ============================================================
 // PROJECT TASKS (for project-level AI chat)
-async function getProjectTasks(projectId) {
+async function getProjectTasks(projectId, userId) {
   const result = await pool.query(
     `
     SELECT
@@ -233,49 +254,90 @@ async function getProjectTasks(projectId) {
     JOIN users creator
       ON creator.id = t.created_by
     WHERE t.project_id = $1
+      AND EXISTS (
+        SELECT 1 FROM organization_members om
+        WHERE om.organization_id = (
+          SELECT organization_id FROM projects WHERE id = t.project_id
+        )
+          AND om.user_id = $2
+      )
+      AND (
+        EXISTS (
+          SELECT 1 FROM organization_members om
+          WHERE om.organization_id = (
+            SELECT organization_id FROM projects WHERE id = t.project_id
+          )
+            AND om.user_id = $2 AND om.role = 'owner'
+        )
+        OR EXISTS (
+          SELECT 1 FROM project_members pm
+          WHERE pm.project_id = t.project_id
+            AND pm.user_id = $2 AND pm.role = 'project_admin'
+        )
+        OR (
+          t.assignee_id = $2
+          AND EXISTS (
+            SELECT 1 FROM project_members pm
+            WHERE pm.project_id = t.project_id AND pm.user_id = $2
+          )
+        )
+      )
     ORDER BY t.created_at DESC
     `,
-    [projectId]
+    [projectId, userId]
   );
 
   return result.rows;
 }
 // ============================================================
 
-async function getProjectStatus(projectId, key) {
-  const result = await pool.query(
+async function getProjectStatus(projectId, key, client = pool) {
+  const result = await client.query(
     `SELECT id, key FROM project_statuses WHERE project_id = $1 AND key = $2`,
     [projectId, key],
   );
   return result.rows[0] || null;
 }
 
-async function assertProjectManager(userId, projectId) {
-  const result = await pool.query(
-    `SELECT
-      EXISTS (
-        SELECT 1 FROM organization_members om
-        JOIN projects p ON p.organization_id = om.organization_id
-        WHERE p.id = $1 AND om.user_id = $2 AND om.role = 'owner'
-      ) AS is_org_owner,
-      EXISTS (
-        SELECT 1 FROM project_members pm
-        WHERE pm.project_id = $1 AND pm.user_id = $2 AND pm.role = 'project_admin'
-      ) AS is_project_admin`,
+async function assertProjectManager(userId, projectId, client = pool) {
+  const target = await client.query(
+    "SELECT organization_id FROM projects WHERE id = $1 FOR SHARE",
+    [projectId],
+  );
+  if (!target.rowCount) {
+    const error = new Error("Project not found.");
+    error.status = 404;
+    throw error;
+  }
+  const organizationMembership = await client.query(
+    `SELECT role FROM organization_members
+     WHERE organization_id = $1 AND user_id = $2 FOR SHARE`,
+    [target.rows[0].organization_id, userId],
+  );
+  const projectMembership = await client.query(
+    `SELECT role FROM project_members
+     WHERE project_id = $1 AND user_id = $2 FOR SHARE`,
     [projectId, userId],
   );
-
-  if (!result.rows[0]?.is_org_owner && !result.rows[0]?.is_project_admin) {
+  if (!organizationMembership.rowCount
+    || (organizationMembership.rows[0]?.role !== "owner"
+    && projectMembership.rows[0]?.role !== "project_admin")) {
     const error = new Error("Project administrator permission required.");
     error.status = 403;
     throw error;
   }
 }
 
-async function assertProjectAssignee(projectId, assigneeId) {
+async function assertProjectAssignee(projectId, assigneeId, client = pool) {
   if (assigneeId === null || assigneeId === undefined || assigneeId === "") return;
-  const result = await pool.query(
-    `SELECT 1 FROM project_members WHERE project_id = $1 AND user_id = $2`,
+  const result = await client.query(
+    `SELECT 1
+     FROM project_members pm
+     JOIN projects p ON p.id = pm.project_id
+     JOIN organization_members om
+       ON om.organization_id = p.organization_id AND om.user_id = pm.user_id
+     WHERE pm.project_id = $1 AND pm.user_id = $2
+     FOR SHARE OF pm, om`,
     [projectId, assigneeId],
   );
   if (!result.rowCount) {
@@ -305,17 +367,18 @@ async function createTask({
   dueDate = null,
   assigneeId = null,
   createdBy,
+  client = pool,
 }) {
-  await assertProjectManager(createdBy, projectId);
-  const projectStatus = await getProjectStatus(projectId, status);
+  await assertProjectManager(createdBy, projectId, client);
+  const projectStatus = await getProjectStatus(projectId, status, client);
   if (!projectStatus) {
     const error = new Error("Invalid task status.");
     error.status = 400;
     throw error;
   }
-  await assertProjectAssignee(projectId, assigneeId);
+  await assertProjectAssignee(projectId, assigneeId, client);
 
-  const result = await pool.query(
+  const result = await client.query(
     `
     INSERT INTO tasks (
       project_id,
@@ -386,12 +449,13 @@ async function updateTask({
   priority,
   assigneeId,
   dueDate,
+  client = pool,
 }) {
   // ==========================================================
   // CHECK CURRENT TASK + PROJECT
   // ==========================================================
 
-  const existing = await pool.query(
+  const existing = await client.query(
     `
     SELECT
       t.*,
@@ -401,6 +465,7 @@ async function updateTask({
       ON p.id = t.project_id
     WHERE t.id = $1
       AND t.project_id = $2
+    FOR UPDATE OF t, p
     `,
     [taskId, projectId]
   );
@@ -419,38 +484,24 @@ async function updateTask({
   // CHECK USER ORGANIZATION ADMIN PERMISSION
   // ==========================================================
 
-  const accessResult = await pool.query(
-    `
-    SELECT
-      EXISTS (
-        SELECT 1
-        FROM organization_members
-        WHERE organization_id = $1
-          AND user_id = $2
-          AND role = 'owner'
-      ) AS is_org_owner,
-
-      EXISTS (
-        SELECT 1
-        FROM project_members
-        WHERE project_id = $3
-          AND user_id = $2
-          AND role = 'project_admin'
-      ) AS is_project_admin,
-
-      EXISTS (
-        SELECT 1
-        FROM project_members
-        WHERE project_id = $3
-          AND user_id = $2
-      ) AS is_project_member
-    `,
-    [organizationId, userId, projectId]
+  const organizationMembership = await client.query(
+    `SELECT role FROM organization_members
+     WHERE organization_id = $1 AND user_id = $2 FOR SHARE`,
+    [organizationId, userId],
   );
+  const projectMembership = await client.query(
+    `SELECT role FROM project_members
+     WHERE project_id = $1 AND user_id = $2 FOR SHARE`,
+    [projectId, userId],
+  );
+  const access = {
+    is_org_owner: organizationMembership.rows[0]?.role === "owner",
+    is_project_admin: projectMembership.rows[0]?.role === "project_admin",
+    is_project_member: Boolean(projectMembership.rowCount),
+  };
 
-  const access = accessResult.rows[0];
-
-  if (!access.is_org_owner && !access.is_project_member) {
+  if (!organizationMembership.rowCount
+    || (!access.is_org_owner && !access.is_project_member)) {
     const error = new Error(
       "You do not have access to this task."
     );
@@ -527,7 +578,7 @@ async function updateTask({
   // VALIDATE STATUS
   // ==========================================================
 
-  const projectStatus = await getProjectStatus(projectId, updatedStatus);
+  const projectStatus = await getProjectStatus(projectId, updatedStatus, client);
 
   if (!projectStatus) {
     const error = new Error(
@@ -565,13 +616,13 @@ async function updateTask({
   // CHECK ASSIGNEE
   // ==========================================================
 
-  await assertProjectAssignee(projectId, updatedAssigneeId);
+  await assertProjectAssignee(projectId, updatedAssigneeId, client);
 
   // ==========================================================
   // UPDATE DATABASE
   // ==========================================================
 
-  const result = await pool.query(
+  const result = await client.query(
     `
     UPDATE tasks
     SET
@@ -612,6 +663,14 @@ async function updateTask({
 
   return {
     task: result.rows[0],
+    before: {
+      title: task.title,
+      description: task.description,
+      status: task.status,
+      priority: task.priority,
+      due_date: task.due_date,
+      assignee_id: task.assignee_id,
+    },
   };
 }
 
@@ -631,125 +690,150 @@ async function deleteTask({
   taskId,
   projectId,
   userId,
+  client: suppliedClient,
 }) {
-  // ==========================================================
-  // CHECK CURRENT TASK + PROJECT
-  // ==========================================================
+  const ownsTransaction = !suppliedClient;
+  const client = suppliedClient || await pool.connect();
 
-  const existing = await pool.query(
-    `
-    SELECT
-      t.*,
-      p.organization_id
-    FROM tasks t
-    JOIN projects p
-      ON p.id = t.project_id
-    WHERE t.id = $1
-      AND t.project_id = $2
-    `,
-    [taskId, projectId]
-  );
+  try {
+    if (ownsTransaction) await client.query("BEGIN");
 
-  if (!existing.rowCount) {
-    const error = new Error("Task not found.");
-    error.status = 404;
-    throw error;
-  }
+    // ==========================================================
+    // CHECK CURRENT TASK + PROJECT
+    // ==========================================================
 
-  const task = existing.rows[0];
-
-  const organizationId = task.organization_id;
-
-  // ==========================================================
-  // CHECK OWNER/PROJECT-ADMIN PERMISSION
-  // ==========================================================
-
-  const accessResult = await pool.query(
-    `
-    SELECT
-      EXISTS (
-        SELECT 1
-        FROM organization_members
-        WHERE organization_id = $1
-          AND user_id = $2
-      ) AS is_org_member,
-
-      EXISTS (
-        SELECT 1
-        FROM organization_members
-        WHERE organization_id = $1
-          AND user_id = $2
-          AND role = 'owner'
-      ) AS is_org_owner,
-
-      EXISTS (
-        SELECT 1
-        FROM project_members
-        WHERE project_id = $3
-          AND user_id = $2
-          AND role = 'project_admin'
-      ) AS is_project_admin
-    `,
-    [organizationId, userId, projectId]
-  );
-
-  const access = accessResult.rows[0];
-
-  // ==========================================================
-  // USER MUST BE ORGANIZATION MEMBER
-  // ==========================================================
-
-  if (!access.is_org_member) {
-    const error = new Error(
-      "You do not have access to this task."
+    const existing = await client.query(
+      `
+      SELECT
+        t.*,
+        p.organization_id
+      FROM tasks t
+      JOIN projects p
+        ON p.id = t.project_id
+      JOIN organizations o
+        ON o.id = p.organization_id
+      WHERE t.id = $1
+        AND t.project_id = $2
+      FOR UPDATE OF t, p, o
+      `,
+      [taskId, projectId]
     );
 
-    error.status = 403;
+    if (!existing.rowCount) {
+      const error = new Error("Task not found.");
+      error.status = 404;
+      throw error;
+    }
 
-    throw error;
-  }
+    const task = existing.rows[0];
 
-  // ==========================================================
-  // USER MUST BE ORG OWNER OR PROJECT ADMIN
-  // ==========================================================
+    const organizationId = task.organization_id;
 
-  if (!access.is_org_owner && !access.is_project_admin) {
-    const error = new Error(
-      "Project administrator permission required."
+    const organizationMemberships = await client.query(
+      `SELECT user_id, role FROM organization_members
+       WHERE organization_id = $1
+       FOR SHARE`,
+      [organizationId],
+    );
+    const projectMemberships = await client.query(
+      `SELECT user_id, role FROM project_members
+       WHERE project_id = $1
+       FOR SHARE`,
+      [projectId],
     );
 
-    error.status = 403;
+    // ==========================================================
+    // CHECK OWNER/PROJECT-ADMIN PERMISSION
+    // ==========================================================
 
-    throw error;
-  }
+    const actorOrganizationMemberships = organizationMemberships.rows
+      .filter((row) => String(row.user_id) === String(userId));
+    const actorProjectMemberships = projectMemberships.rows
+      .filter((row) => String(row.user_id) === String(userId));
+    const access = {
+      is_org_member: actorOrganizationMemberships.length > 0,
+      is_org_owner: actorOrganizationMemberships.some((row) => row.role === "owner"),
+      is_project_admin: actorProjectMemberships.some((row) => row.role === "project_admin"),
+    };
 
-  // ==========================================================
-  // DELETE TASK
-  // ==========================================================
+    // ==========================================================
+    // USER MUST BE ORGANIZATION MEMBER
+    // ==========================================================
 
-  const result = await pool.query(
-    `
-    DELETE FROM tasks
-    WHERE id = $1
-      AND project_id = $2
-    RETURNING *
-    `,
-    [taskId, projectId]
-  );
+    if (!access.is_org_member) {
+      const error = new Error(
+        "You do not have access to this task."
+      );
 
-  if (!result.rowCount) {
-    const error = new Error(
-      "Task could not be deleted."
+      error.status = 403;
+
+      throw error;
+    }
+
+    // ==========================================================
+    // USER MUST BE ORG OWNER OR PROJECT ADMIN
+    // ==========================================================
+
+    if (!access.is_org_owner && !access.is_project_admin) {
+      const error = new Error(
+        "Project administrator permission required."
+      );
+
+      error.status = 403;
+
+      throw error;
+    }
+
+    const audienceUserIds = new Set();
+    for (const membership of organizationMemberships.rows) {
+      if (membership.role === "owner") audienceUserIds.add(Number(membership.user_id));
+    }
+    for (const membership of projectMemberships.rows) {
+      if (membership.role === "project_admin") audienceUserIds.add(Number(membership.user_id));
+      if (
+        task.assignee_id !== null
+        && String(membership.user_id) === String(task.assignee_id)
+      ) {
+        audienceUserIds.add(Number(membership.user_id));
+      }
+    }
+
+    // ==========================================================
+    // DELETE TASK
+    // ==========================================================
+
+    const result = await client.query(
+      `
+      DELETE FROM tasks
+      WHERE id = $1
+        AND project_id = $2
+      RETURNING *
+      `,
+      [taskId, projectId]
     );
 
-    error.status = 500;
+    if (!result.rowCount) {
+      const error = new Error(
+        "Task could not be deleted."
+      );
 
+      error.status = 500;
+
+      throw error;
+    }
+
+    if (ownsTransaction) await client.query("COMMIT");
+
+    return {
+      task: result.rows[0],
+      audienceUserIds: [...audienceUserIds],
+    };
+  } catch (error) {
+    if (ownsTransaction) await client.query("ROLLBACK").catch(() => {});
     throw error;
+  } finally {
+    if (ownsTransaction) client.release();
   }
-
-  return {
-    task: result.rows[0],
-  };
 }
 
 module.exports = {
@@ -764,7 +848,8 @@ module.exports = {
   keywordSearchTasks,
   getGlobalKnowledgeContext,
   updateTask,
-  deleteTask
+  deleteTask,
+  assertProjectManager,
 };
 
 // ============================================================
@@ -796,6 +881,23 @@ async function getGlobalFacts(userId) {
     WHERE EXISTS (
       SELECT 1 FROM organization_members om
       WHERE om.organization_id = p.organization_id AND om.user_id = $1
+    )
+    AND (
+      EXISTS (
+        SELECT 1 FROM organization_members om
+        WHERE om.organization_id = p.organization_id
+          AND om.user_id = $1 AND om.role = 'owner'
+      )
+      OR EXISTS (
+        SELECT 1 FROM project_members pm
+        WHERE pm.project_id = p.id AND pm.user_id = $1
+          AND pm.role = 'project_admin'
+      )
+      OR EXISTS (
+        SELECT 1 FROM project_members pm
+        WHERE pm.project_id = p.id AND pm.user_id = $1
+          AND t.assignee_id = $1
+      )
     )
     ORDER BY t.due_date ASC NULLS LAST, t.created_at DESC
     `,
@@ -839,6 +941,23 @@ async function keywordSearchTasks(userId, query, limit = 8) {
       SELECT 1 FROM organization_members om
       WHERE om.organization_id = p.organization_id AND om.user_id = $1
     )
+    AND (
+      EXISTS (
+        SELECT 1 FROM organization_members om
+        WHERE om.organization_id = p.organization_id
+          AND om.user_id = $1 AND om.role = 'owner'
+      )
+      OR EXISTS (
+        SELECT 1 FROM project_members pm
+        WHERE pm.project_id = p.id AND pm.user_id = $1
+          AND pm.role = 'project_admin'
+      )
+      OR EXISTS (
+        SELECT 1 FROM project_members pm
+        WHERE pm.project_id = p.id AND pm.user_id = $1
+          AND t.assignee_id = $1
+      )
+    )
     AND (t.title ILIKE $2 OR t.description ILIKE $2)
     ORDER BY t.created_at DESC
     LIMIT $3
@@ -860,7 +979,7 @@ async function getGlobalKnowledgeContext(userId, query) {
 
   try {
     [semanticHits, keywordHits] = await Promise.all([
-      searchKnowledgeAcrossOrganizations({ query, organizationIds, limit: 6 }),
+      searchKnowledgeAcrossOrganizations({ query, organizationIds, userId, limit: 6 }),
       keywordSearchTasks(userId, query, 5),
     ]);
   } catch (error) {
